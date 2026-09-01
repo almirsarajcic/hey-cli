@@ -218,3 +218,44 @@ func TestReadPageReportsAFailedRead(t *testing.T) {
 		t.Fatal("expected the server failure to surface")
 	}
 }
+
+func TestReadPageReadsABundlesUnseenPostings(t *testing.T) {
+	var path, cursor string
+	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		path, cursor = r.URL.Path, r.URL.Query().Get("page")
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Link", fmt.Sprintf("<http://%s/postings/9/bundles/unseen.json?page=cursor-3>; rel=\"next\"", r.Host))
+		_, _ = io.WriteString(w, `{"contact":{"id":5,"name":"GitHub"},"postings":[{"id":301},{"id":302}]}`)
+	})
+
+	page, err := ReadPage(context.Background(), client, Source{Kind: KindBundle, ID: 9}, "cursor-2")
+	if err != nil {
+		t.Fatalf("read page: %v", err)
+	}
+	if path != "/postings/9/bundles/unseen.json" || cursor != "cursor-2" {
+		t.Errorf("request = %s?page=%s", path, cursor)
+	}
+	if len(page.Postings) != 2 || page.Cursor != "cursor-3" {
+		t.Errorf("page = %+v", page)
+	}
+}
+
+func TestReadPageReadsAContactsThreads(t *testing.T) {
+	var path, cursor string
+	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		path, cursor = r.URL.Path, r.URL.Query().Get("page")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":5,"name":"GitHub","entries_title":"All threads with GitHub","postings":[{"id":401}]}`)
+	})
+
+	page, err := ReadPage(context.Background(), client, Source{Kind: KindContact, ID: 5}, "cursor-2")
+	if err != nil {
+		t.Fatalf("read page: %v", err)
+	}
+	if path != "/contacts/5.json" || cursor != "cursor-2" {
+		t.Errorf("request = %s?page=%s", path, cursor)
+	}
+	if len(page.Postings) != 1 || page.Cursor != "" {
+		t.Errorf("page = %+v", page)
+	}
+}

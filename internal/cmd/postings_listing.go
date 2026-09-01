@@ -57,6 +57,11 @@ type postingsListing struct {
 	cursorNotice func(shown, total int) string
 	breadcrumbs  []output.Breadcrumb
 	payload      func(source mail.Source, postings []sourcePostingOutput, nextPage string, total int) any
+
+	// emptyNotice speaks for a first page with nothing on it, where the counts alone
+	// would say nothing at all. Only the bundle sets one: a bundle with no unseen
+	// threads is not empty, it has been read, and its mail lives on its contact's list.
+	emptyNotice string
 }
 
 func (l postingsListing) write(cmd *cobra.Command, source mail.Source, first pageResult[generated.Posting], request pageRequest, fromCursor bool) error {
@@ -107,6 +112,9 @@ func (l postingsListing) sourcePayload(source mail.Source, postings []generated.
 }
 
 func (l postingsListing) notice(shown, total int, hasMore, all, fromCursor bool) string {
+	if shown == 0 && !hasMore && !fromCursor && l.emptyNotice != "" {
+		return l.emptyNotice
+	}
 	if all {
 		if hasMore {
 			return fmt.Sprintf("Showing %d results. Pagination limit reached; continue with --page using next_page.", shown)

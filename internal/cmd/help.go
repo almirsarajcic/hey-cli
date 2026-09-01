@@ -21,7 +21,7 @@ var curatedCategories = []struct {
 	},
 	{
 		heading: "MAIL",
-		names:   []string{"screener", "attachment", "draft", "watch"},
+		names:   []string{"bundle", "screener", "attachment", "draft", "watch"},
 	},
 	{
 		heading: "WRITE & SHARE",

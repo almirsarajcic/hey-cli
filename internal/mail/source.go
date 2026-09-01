@@ -1,6 +1,6 @@
-// Package mail reads the places HEY keeps postings — a box, a label, a collection —
-// through one Source type and one page read, so a caller never has to know which
-// endpoint a source is served by.
+// Package mail reads the places HEY keeps postings — a box, a label, a collection, a
+// bundle's unseen threads, a contact's threads — through one Source type and one page
+// read, so a caller never has to know which endpoint a source is served by.
 package mail
 
 import (
@@ -17,6 +17,8 @@ const (
 	KindBox        Kind = "box"
 	KindFolder     Kind = "folder"
 	KindCollection Kind = "collection"
+	KindBundle     Kind = "bundle"
+	KindContact    Kind = "contact"
 )
 
 // Source is a place postings are read from. BoxKind carries HEY's own kind for a box
@@ -70,6 +72,28 @@ func FolderSource(folder *generated.FolderWithPostings) Source {
 		AppURL:    folder.AppUrl,
 		CreatedAt: folder.CreatedAt,
 		UpdatedAt: folder.UpdatedAt,
+	}
+}
+
+// BundleSource describes a bundle posting as a source: the unseen threads it groups,
+// named for the bundled contact. The ID is the bundle row's own box item id, which is
+// what the unseen route is addressed by.
+func BundleSource(postingID int64, contact generated.Contact) Source {
+	return Source{
+		Kind: KindBundle,
+		ID:   postingID,
+		Name: contact.Name,
+	}
+}
+
+// ContactSource describes a contact as a source: every thread they are on, seen and
+// unseen — the list HEY heads with the contact's entries_title.
+func ContactSource(contact *generated.ContactDetail) Source {
+	return Source{
+		Kind:      KindContact,
+		ID:        contact.Id,
+		Name:      contact.Name,
+		UpdatedAt: contact.UpdatedAt,
 	}
 }
 

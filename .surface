@@ -61,6 +61,14 @@ hey bulk-reply send --attach
 hey bulk-reply send --message
 hey bulk-reply send --message-html
 hey bulk-reply undo
+hey bundle
+hey bundle --all
+hey bundle --limit
+hey bundle --page
+hey bundle view
+hey bundle view --all
+hey bundle view --limit
+hey bundle view --page
 hey calendar
 hey calendar list
 hey clip
@@ -124,6 +132,10 @@ hey contact note set --note-html
 hey contact note show
 hey contact show
 hey contact show-again
+hey contact threads
+hey contact threads --all
+hey contact threads --limit
+hey contact threads --page
 hey contact unbundle
 hey contact update
 hey contact update --alias

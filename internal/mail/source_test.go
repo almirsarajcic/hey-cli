@@ -54,3 +54,16 @@ func TestFolderAndCollectionSourcesCarryTheirTimestamps(t *testing.T) {
 		t.Errorf("collection source = %+v", collection)
 	}
 }
+
+func TestBundleAndContactSourcesNameTheContact(t *testing.T) {
+	bundle := BundleSource(9, generated.Contact{Id: 5, Name: "GitHub"})
+	if bundle.Kind != KindBundle || bundle.ID != 9 || bundle.Name != "GitHub" {
+		t.Errorf("bundle source = %+v", bundle)
+	}
+
+	updated := time.Date(2026, 3, 4, 9, 30, 0, 0, time.UTC)
+	contact := ContactSource(&generated.ContactDetail{Id: 5, Name: "GitHub", UpdatedAt: updated})
+	if contact.Kind != KindContact || contact.ID != 5 || contact.Name != "GitHub" || !contact.UpdatedAt.Equal(updated) {
+		t.Errorf("contact source = %+v", contact)
+	}
+}
