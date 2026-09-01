@@ -55,8 +55,11 @@ func composeTestServer(t *testing.T) (*mailView, *struct {
 		case "/topics/100.json":
 			_, _ = w.Write([]byte(`{"id":100,"account_id":9,"name":"Quarterly planning","entries":[{"id":500},{"id":501}]}`))
 		case "/messages/501.json":
-			_, _ = w.Write([]byte(`{"id":501,"sender":{"id":3,"name":"Rick Sanchez","email_address":"rick@example.com"},
+			_, _ = w.Write([]byte(`{"id":501,"subject":"Quarterly planning","sender":{"id":3,"name":"Rick Sanchez","email_address":"rick@example.com"},
 				"addressed":{"directly":[{"id":1,"name":"Jane Doe","email_address":"jane@example.com"}]}}`))
+		case "/entries/501/replies/new.json":
+			_, _ = w.Write([]byte(`{"subject":"Re: Quarterly planning",
+				"addressed":{"directly":[{"id":3,"name":"Rick Sanchez","email_address":"rick@example.com"}]}}`))
 		case "/entries/501/forwards/new.json":
 			_, _ = w.Write([]byte(`{"subject":"Fwd: Quarterly planning","content":"<div>Quoted message</div>"}`))
 		case "/snippets.json":
@@ -217,7 +220,7 @@ func TestReplyFormPrefillsAndSends(t *testing.T) {
 	v, rec := composeTestServer(t)
 	v.Resize(80, 30)
 	v.Update(replyContextLoadedMsg{
-		boxID: 1, topicID: 7, topicName: "Kitchen", entryID: 99,
+		boxID: 1, topicID: 7, topicName: "Kitchen", entryID: 99, subject: "Re: Kitchen",
 		to: []string{"jane@x.com"}, cc: []string{"bob@x.com"},
 	})
 	f := composeModal(v)
@@ -245,6 +248,10 @@ func TestReplyFormPrefillsAndSends(t *testing.T) {
 	if rec.body["message"].(map[string]any)["content"] != "<p>Thanks!</p>" {
 		t.Errorf("body = %v", rec.body)
 	}
+	// HEY never derives a reply's subject, so the reply carries the prefilled one.
+	if rec.body["message"].(map[string]any)["subject"] != "Re: Kitchen" {
+		t.Errorf("subject = %v, want Re: Kitchen", rec.body["message"].(map[string]any)["subject"])
+	}
 	addressed := rec.body["entry"].(map[string]any)["addressed"].(map[string]any)
 	if got := addressed["directly"].([]any); len(got) != 1 || got[0] != "jane@x.com" {
 		t.Errorf("directly = %v", got)
@@ -263,9 +270,15 @@ func TestReplyLoadsAndSendsThroughThreadAccount(t *testing.T) {
 	if accountID, ok := ctxMsg.sdk.AccountID(); !ok || accountID != 9 {
 		t.Fatalf("reply SDK account = %d, %v", accountID, ok)
 	}
-	// The recipients come from the entry the reply answers, and reach whoever wrote it.
-	if want := []string{"jane@example.com", "rick@example.com"}; !slices.Equal(ctxMsg.to, want) {
+	// The recipients come from HEY's reply prefill, which excludes the acting
+	// user's own addresses — jane is absent even though the entry addresses her.
+	if want := []string{"rick@example.com"}; !slices.Equal(ctxMsg.to, want) {
 		t.Errorf("to = %v, want %v", ctxMsg.to, want)
+	}
+	// So does the subject: HEY never derives a reply's server-side, so the
+	// prefill's "Re: …" is what the reply must carry.
+	if ctxMsg.subject != "Re: Quarterly planning" {
+		t.Errorf("subject = %q, want %q", ctxMsg.subject, "Re: Quarterly planning")
 	}
 	v.Update(ctxMsg)
 	typeText(v, "Thanks!")
@@ -275,6 +288,65 @@ func TestReplyLoadsAndSendsThroughThreadAccount(t *testing.T) {
 	}
 	if rec.path != "/entries/501/replies.json" || rec.account != "9" {
 		t.Fatalf("reply path/account = %s/%q, want /entries/501/replies.json/9", rec.path, rec.account)
+	}
+}
+
+func TestReplyContextFallsBackWhenPrefillIsEmpty(t *testing.T) {
+	// On a thread with yourself, everyone HEY excludes from the prefill is
+	// everyone there is; the local computation keeps that reply addressable. The
+	// subject only falls back with it when the prefill answered none.
+	for name, testCase := range map[string]struct {
+		prefillJSON string
+		wantSubject string
+	}{
+		"an empty prefill derives the subject locally": {
+			prefillJSON: `{}`,
+			wantSubject: "Re: Quarterly planning",
+		},
+		"a recipientless prefill keeps its subject": {
+			prefillJSON: `{"subject":"Re: Quarterly planning per HEY"}`,
+			wantSubject: "Re: Quarterly planning per HEY",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/identity.json":
+					_, _ = w.Write([]byte(`{"id":1,"accounts":[{"id":9,"status":"active"}],"senders":[{"id":42,"account_id":9,"default":true}]}`))
+				case "/topics/100.json":
+					_, _ = w.Write([]byte(`{"id":100,"account_id":9,"name":"Quarterly planning","entries":[{"id":501}]}`))
+				case "/messages/501.json":
+					_, _ = w.Write([]byte(`{"id":501,"subject":"Quarterly planning","sender":{"id":3,"name":"Rick Sanchez","email_address":"rick@example.com"},
+						"addressed":{"directly":[{"id":1,"name":"Jane Doe","email_address":"jane@example.com"}]}}`))
+				case "/entries/501/replies/new.json":
+					_, _ = w.Write([]byte(testCase.prefillJSON))
+				default:
+					_, _ = w.Write([]byte(`{}`))
+				}
+			}))
+			t.Cleanup(srv.Close)
+			sdk := hey.NewClient(&hey.Config{BaseURL: srv.URL}, &hey.StaticTokenProvider{Token: "t"}, hey.WithMaxRetries(0))
+			vc := testVC()
+			vc.rootSDK = sdk
+			vc.sdk = sdk
+			vc.ctx = context.Background()
+			v := newMailView(vc)
+			v.boxes = orderBoxes(testBoxes())
+			v.Update(currentPostingsLoaded(v, testPostings()))
+
+			loaded := runCmd(v.loadReplyContext(100, "Quarterly planning"))
+			ctxMsg, ok := loaded.(replyContextLoadedMsg)
+			if !ok || ctxMsg.err != nil {
+				t.Fatalf("reply command returned %#v", loaded)
+			}
+			if want := []string{"jane@example.com", "rick@example.com"}; !slices.Equal(ctxMsg.to, want) {
+				t.Errorf("to = %v, want %v", ctxMsg.to, want)
+			}
+			if ctxMsg.subject != testCase.wantSubject {
+				t.Errorf("subject = %q, want %q", ctxMsg.subject, testCase.wantSubject)
+			}
+		})
 	}
 }
 

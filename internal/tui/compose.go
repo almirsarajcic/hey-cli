@@ -19,7 +19,7 @@ import (
 // --- Messages ---
 
 // replyContextLoadedMsg carries what a reply needs from the thread: the entry to
-// reply to and who the thread is addressed to.
+// reply to, the "Re: …" subject it goes out under, and who the thread is addressed to.
 type replyContextLoadedMsg struct {
 	requestID uint64
 	boxID     int64
@@ -27,6 +27,7 @@ type replyContextLoadedMsg struct {
 	topicName string
 	entryID   int64
 	sdk       *hey.Client
+	subject   string
 	to, cc    []string
 	bcc       []string
 	err       error
@@ -78,7 +79,8 @@ const (
 type composeForm struct {
 	mode             composeMode
 	topicName        string
-	entryID          int64 // reply target (composeReply only)
+	entryID          int64  // reply target (composeReply only)
+	replySubject     string // the "Re: …" subject a reply goes out under (composeReply only)
 	sendSDK          *hey.Client
 	forwardedContent string
 
@@ -135,6 +137,7 @@ func newReplyForm(ctxMsg replyContextLoadedMsg, s styles) *composeForm {
 	f := newComposeForm(composeReply, s)
 	f.topicName = ctxMsg.topicName
 	f.entryID = ctxMsg.entryID
+	f.replySubject = ctxMsg.subject
 	f.sendSDK = ctxMsg.sdk
 	f.inputs[fieldTo].SetValue(strings.Join(ctxMsg.to, ", "))
 	f.inputs[fieldCc].SetValue(strings.Join(ctxMsg.cc, ", "))
@@ -190,7 +193,9 @@ func (f *composeForm) values() (to, cc, bcc []string, subject, body string) {
 	to = parseAddressList(f.inputs[fieldTo].Value())
 	cc = parseAddressList(f.inputs[fieldCc].Value())
 	bcc = parseAddressList(f.inputs[fieldBcc].Value())
-	if f.mode != composeReply {
+	if f.mode == composeReply {
+		subject = f.replySubject
+	} else {
 		subject = strings.TrimSpace(f.inputs[fieldSubject].Value())
 	}
 	body = strings.TrimSpace(f.body.Value())
@@ -412,6 +417,36 @@ func (v *mailView) loadReplyContext(topicID int64, topicName string) tea.Cmd {
 			return replyContextLoadedMsg{requestID: requestID, boxID: boxID, err: err}
 		}
 		entryID := topic.Entries[len(topic.Entries)-1].Id
+
+		// HEY's reply prefill (GET /entries/{id}/replies/new) is the authority on how
+		// a reply starts out: the "Re: …" subject it goes out under, and recipients
+		// with the acting user's own addresses, aliases and catch-alls excluded — an
+		// exclusion this client cannot compute locally. A failed read falls back to
+		// the local computation, and so does an empty answer: on a thread with
+		// yourself, everyone HEY excludes is everyone there is. The prefill's subject
+		// survives that recipient fallback — only the recipients needed it.
+		var prefillSubject string
+		if prefilled, prefillErr := accountSDK.Entries().NewReply(ctx, entryID); prefillErr == nil && prefilled != nil {
+			prefillSubject = prefilled.Subject
+			to := addressesOf(prefilled.Addressed.Directly, "")
+			cc := addressesOf(prefilled.Addressed.Copied, "")
+			bcc := addressesOf(prefilled.Addressed.Blindcopied, "")
+			if len(to)+len(cc)+len(bcc) > 0 {
+				return replyContextLoadedMsg{
+					requestID: requestID,
+					boxID:     boxID,
+					topicID:   topicID,
+					topicName: topicName,
+					entryID:   entryID,
+					sdk:       accountSDK,
+					subject:   prefillSubject,
+					to:        to,
+					cc:        cc,
+					bcc:       bcc,
+				}
+			}
+		}
+
 		message, err := accountSDK.Messages().Get(ctx, entryID)
 		if err != nil {
 			return replyContextLoadedMsg{requestID: requestID, boxID: boxID, err: err}
@@ -424,6 +459,10 @@ func (v *mailView) loadReplyContext(topicID int64, topicName string) tea.Cmd {
 			}
 		}
 		to, cc, bcc := recipientsForReplyTo(*message)
+		subject := prefillSubject
+		if subject == "" {
+			subject = replySubjectFor(*message)
+		}
 		return replyContextLoadedMsg{
 			requestID: requestID,
 			boxID:     boxID,
@@ -431,11 +470,30 @@ func (v *mailView) loadReplyContext(topicID int64, topicName string) tea.Cmd {
 			topicName: topicName,
 			entryID:   entryID,
 			sdk:       accountSDK,
+			subject:   subject,
 			to:        to,
 			cc:        cc,
 			bcc:       bcc,
 		}
 	}
+}
+
+// replySubjectFor answers the subject a reply to this message goes out under, the way
+// HEY derives it in Entry::Replyable#reply_subject: a "Re: " prefix, without doubling
+// one already there in any casing. HEY never derives a reply's subject server-side, so
+// the reply must carry it. An empty subject stays empty rather than becoming a bare
+// "Re:".
+func replySubjectFor(message generated.Message) string {
+	subject := strings.TrimSpace(message.Subject)
+	if subject == "" {
+		return ""
+	}
+
+	rest := subject
+	if len(rest) >= 3 && strings.EqualFold(rest[:3], "Re:") {
+		rest = strings.TrimPrefix(rest[3:], " ")
+	}
+	return strings.TrimRight("Re: "+rest, " ")
 }
 
 // recipientsForReplyTo answers who a reply to this message goes to: the message's own
@@ -551,7 +609,7 @@ func (v *mailView) send(f *composeForm) tea.Cmd {
 	case composeReply:
 		entryID := f.entryID
 		return func() tea.Msg {
-			err := sdk.Entries().CreateReply(ctx, entryID, body, to, cc, bcc)
+			err := sdk.Entries().CreateReply(ctx, entryID, subject, body, to, cc, bcc)
 			return composeSentMsg{label: "Reply sent", err: err}
 		}
 	case composeForward:
