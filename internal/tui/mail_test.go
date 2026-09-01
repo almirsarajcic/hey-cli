@@ -606,6 +606,257 @@ func TestMailViewPostingKeysCallExpectedEndpoints(t *testing.T) {
 	}
 }
 
+func TestMailViewFilesOpenThread(t *testing.T) {
+	tests := []struct {
+		name   string
+		key    string
+		boxID  int64
+		notice string
+	}{
+		{"reply later", "l", 4, "Thread moved to Reply Later"},
+		{"set aside", "a", 3, "Thread moved to Set Aside"},
+		{"set aside uppercase", "A", 3, "Thread moved to Set Aside"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v, recorded := mailWithTestServer(t, http.StatusNoContent)
+			v.Update(runCmd(v.HandleContentKey(keyPress("enter"))))
+			if !v.inThread {
+				t.Fatal("enter should open the selected thread")
+			}
+
+			done, ok := runCmd(v.HandleContentKey(keyPress(tt.key))).(postingActionDoneMsg)
+			if !ok || done.err != nil {
+				t.Fatalf("filing command returned %#v", done)
+			}
+			if recorded.method != http.MethodPost || recorded.path != "/postings/moves.json" {
+				t.Errorf("request = %s %s, want POST /postings/moves.json", recorded.method, recorded.path)
+			}
+			if len(recorded.body.PostingIDs) != 1 || recorded.body.PostingIDs[0] != 100 {
+				t.Errorf("posting_ids = %v, want [100]", recorded.body.PostingIDs)
+			}
+			if recorded.body.BoxID == nil || *recorded.body.BoxID != tt.boxID {
+				t.Errorf("box_id = %v, want %d", recorded.body.BoxID, tt.boxID)
+			}
+
+			answer, _ := v.Update(done)
+			if toast := deliverToView(v, answer); toast != tt.notice {
+				t.Errorf("toast = %q, want %q", toast, tt.notice)
+			}
+			if !v.inThread {
+				t.Error("filing should keep the thread open, the way the web app stays on the topic")
+			}
+			if v.postingIndex(100) != -1 {
+				t.Error("the filed thread should leave the box list behind the reader")
+			}
+		})
+	}
+}
+
+func TestMailViewFilesOpenThreadAfterMarkSeenCoversItsRow(t *testing.T) {
+	v, recorded := mailWithTestServer(t, http.StatusNoContent)
+	v.postingList.setCover(coverTopo)
+
+	opened, _ := v.Update(runCmd(v.HandleContentKey(keyPress("enter"))))
+	if !v.inThread {
+		t.Fatal("enter should open the selected thread")
+	}
+	// The mark-seen that opening triggers slides the row under the cover and
+	// clamps the cursor off it, so filing cannot go through the selection.
+	deliverToView(v, opened)
+	if p := v.actionList().selectedPosting(); p != nil && p.ID == 100 {
+		t.Fatal("mark-seen under a cover should move the cursor off the opened row")
+	}
+
+	done, ok := runCmd(v.HandleContentKey(keyPress("a"))).(postingActionDoneMsg)
+	if !ok || done.err != nil {
+		t.Fatalf("filing command returned %#v", done)
+	}
+	if recorded.method != http.MethodPost || recorded.path != "/postings/moves.json" {
+		t.Errorf("request = %s %s, want POST /postings/moves.json", recorded.method, recorded.path)
+	}
+	if len(recorded.body.PostingIDs) != 1 || recorded.body.PostingIDs[0] != 100 {
+		t.Errorf("posting_ids = %v, want [100]", recorded.body.PostingIDs)
+	}
+}
+
+func TestMailViewFilesOpenThreadAfterLiveRefreshDropsItsRow(t *testing.T) {
+	v, recorded := mailWithTestServer(t, http.StatusNoContent)
+	v.Update(runCmd(v.HandleContentKey(keyPress("enter"))))
+	if !v.inThread {
+		t.Fatal("enter should open the selected thread")
+	}
+
+	// A live refresh whose head no longer returns the opened row takes it out of
+	// the list entirely, so filing cannot go looking for it there.
+	v.Update(postingsRefreshedMsg{
+		requestID:  v.liveRequestID,
+		boxID:      v.currentBoxID(),
+		sourceKind: v.currentSourceKind(),
+		postings:   testPostings()[1:],
+	})
+	if v.postingIndex(100) != -1 {
+		t.Fatal("test needs the refresh to drop the opened row from the list")
+	}
+	if bindings := fmt.Sprint(v.HelpBindings()); !strings.Contains(bindings, "set aside") {
+		t.Errorf("thread help = %s, should keep advertising filing", bindings)
+	}
+
+	done, ok := runCmd(v.HandleContentKey(keyPress("l"))).(postingActionDoneMsg)
+	if !ok || done.err != nil {
+		t.Fatalf("filing command returned %#v", done)
+	}
+	if recorded.method != http.MethodPost || recorded.path != "/postings/moves.json" {
+		t.Errorf("request = %s %s, want POST /postings/moves.json", recorded.method, recorded.path)
+	}
+	if len(recorded.body.PostingIDs) != 1 || recorded.body.PostingIDs[0] != 100 {
+		t.Errorf("posting_ids = %v, want [100]", recorded.body.PostingIDs)
+	}
+}
+
+func TestMailViewFilesOpenThreadWhereItLandedLastTime(t *testing.T) {
+	v, recorded := mailWithTestServer(t, http.StatusNoContent)
+	v.boxes = append(v.boxes, mail.Source{Kind: mail.KindBox, ID: 3, Name: "Set Aside", BoxKind: hey.BoxKindSetAside})
+	v.boxIndex = len(v.boxes) - 1
+	v.Update(currentPostingsLoaded(v, testPostings()))
+	v.Update(runCmd(v.HandleContentKey(keyPress("enter"))))
+	if !v.inThread {
+		t.Fatal("enter should open the selected thread")
+	}
+
+	// The thread was opened from Set Aside, so a answers without a request.
+	if cmd := v.HandleContentKey(keyPress("a")); cmd != nil {
+		t.Errorf("filing to the box the thread is in should not move: %#v", runCmd(cmd))
+	}
+	if v.notice != "Already in Set Aside" {
+		t.Errorf("notice = %q, want %q", v.notice, "Already in Set Aside")
+	}
+
+	// Filing to Reply Later moves the thread there, and later keys measure
+	// against where it landed: l answers in place, a moves it back.
+	done, ok := runCmd(v.HandleContentKey(keyPress("l"))).(postingActionDoneMsg)
+	if !ok || done.err != nil {
+		t.Fatalf("filing command returned %#v", done)
+	}
+	v.Update(done)
+
+	if cmd := v.HandleContentKey(keyPress("l")); cmd != nil {
+		t.Errorf("filing to the box the thread landed in should not move: %#v", runCmd(cmd))
+	}
+	if v.notice != "Already in Reply Later" {
+		t.Errorf("notice = %q, want %q", v.notice, "Already in Reply Later")
+	}
+
+	done, ok = runCmd(v.HandleContentKey(keyPress("a"))).(postingActionDoneMsg)
+	if !ok || done.err != nil {
+		t.Fatalf("filing command returned %#v", done)
+	}
+	if recorded.body.BoxID == nil || *recorded.body.BoxID != 3 {
+		t.Errorf("box_id = %v, want 3", recorded.body.BoxID)
+	}
+
+	// Landing back in the box on screen, whose row was removed when the thread
+	// first filed away, re-reads the head so the list holds what the server does.
+	restore, _ := v.Update(done)
+	if restore == nil {
+		t.Fatal("filing back into the box on screen should re-read its head")
+	}
+	v.Update(postingsRefreshedMsg{
+		requestID:  v.liveRequestID,
+		boxID:      v.currentBoxID(),
+		sourceKind: v.currentSourceKind(),
+		postings:   testPostings(),
+	})
+	if v.postingIndex(100) == -1 {
+		t.Error("the re-read head should put the returned thread back on the list")
+	}
+}
+
+func TestMailViewFilesOpenThreadRecordsOnlyTheLatestFiling(t *testing.T) {
+	v, _ := mailWithTestServer(t, http.StatusNoContent)
+	v.Update(runCmd(v.HandleContentKey(keyPress("enter"))))
+	if !v.inThread {
+		t.Fatal("enter should open the selected thread")
+	}
+
+	// Two filing keys faster than their requests answer, with the responses
+	// crossing: the first-dispatched move answers last. Only the latest
+	// dispatch records where the thread landed.
+	aside := v.HandleContentKey(keyPress("a"))
+	later := v.HandleContentKey(keyPress("l"))
+	laterDone, ok := runCmd(later).(postingActionDoneMsg)
+	if !ok || laterDone.err != nil {
+		t.Fatalf("filing command returned %#v", laterDone)
+	}
+	asideDone, ok := runCmd(aside).(postingActionDoneMsg)
+	if !ok || asideDone.err != nil {
+		t.Fatalf("filing command returned %#v", asideDone)
+	}
+	v.Update(laterDone)
+	v.Update(asideDone)
+
+	if cmd := v.HandleContentKey(keyPress("l")); cmd != nil {
+		t.Errorf("the thread landed in Reply Later, so l should answer in place: %#v", runCmd(cmd))
+	}
+	if v.notice != "Already in Reply Later" {
+		t.Errorf("notice = %q, want %q", v.notice, "Already in Reply Later")
+	}
+}
+
+func TestMailViewFilesOpenThreadOnlyFromFilingLists(t *testing.T) {
+	t.Run("search result", func(t *testing.T) {
+		v := mailWithPostings()
+		v.searchActive = true
+		v.searchList.setPostings([]mail.Posting{{ID: 10, TopicID: 100, Name: "Hello world"}})
+		v.inThread = true
+		v.topicID = 100
+		v.threadPosting = mail.Posting{ID: 10, TopicID: 100}
+
+		if cmd := v.HandleContentKey(keyPress("a")); cmd != nil {
+			t.Errorf("a search-opened thread should not file: %#v", runCmd(cmd))
+		}
+		if v.notice != "Can't file this thread from here" {
+			t.Errorf("notice = %q, want the filing explanation", v.notice)
+		}
+	})
+
+	t.Run("directly opened topic", func(t *testing.T) {
+		v := mailWithPostings()
+		v.inThread = true
+		v.topicID = 555 // opened by URL, with no posting row behind it
+
+		if cmd := v.HandleContentKey(keyPress("l")); cmd != nil {
+			t.Errorf("a directly opened thread should not file the selected row: %#v", runCmd(cmd))
+		}
+		if v.notice != "Can't file this thread from here" {
+			t.Errorf("notice = %q, want the filing explanation", v.notice)
+		}
+	})
+}
+
+func TestMailViewThreadHelpAdvertisesFilingKeys(t *testing.T) {
+	v := mailWithPostings()
+	v.inThread = true
+	v.topicID = 100
+	v.threadPosting = mail.Posting{ID: 100, TopicID: 100}
+
+	bindings := fmt.Sprint(v.HelpBindings())
+	for _, want := range []string{"reply later", "set aside"} {
+		if !strings.Contains(bindings, want) {
+			t.Errorf("thread help = %s, want %q", bindings, want)
+		}
+	}
+
+	v.threadPosting = mail.Posting{} // opened by URL, with no posting row behind it
+	bindings = fmt.Sprint(v.HelpBindings())
+	for _, missing := range []string{"reply later", "set aside"} {
+		if strings.Contains(bindings, missing) {
+			t.Errorf("unfilable thread help = %s, should drop %q", bindings, missing)
+		}
+	}
+}
+
 func TestMailViewUnseenKeysRestoreSeenAndBubbledUpThreads(t *testing.T) {
 	for _, testCase := range []struct {
 		name      string
