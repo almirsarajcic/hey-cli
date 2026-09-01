@@ -439,8 +439,8 @@ has one answer in the TUI rather than one per section.
 
 ### A mail source reads its own page
 
-`internal/mail` is where a box, a label and a collection stop being three endpoints and
-become one `Source` with one `ReadPage`. It follows the shape `internal/folders` and
+`internal/mail` is where a box, a label, a collection, a bundle's unseen threads and a
+contact's threads stop being five endpoints and become one `Source` with one `ReadPage`. It follows the shape `internal/folders` and
 `internal/habit` already set: a domain package taking `client *hey.Client`, imported by
 whoever needs it.
 
@@ -475,6 +475,15 @@ bundle with several unseen threads (or none) names no topic and answers zero.
 `mail.TopicIDOf` and the `mail.TopicIDIn` parse under it are exported because
 `internal/cmd` needs the same answer — `resolvePostingTopicID` in `sdk.go` is a call to
 them, not a second copy.
+
+**A bundle row's mail is reached the way the TUI reaches it.** `hey bundle view` lists
+the unseen threads a bundle groups (`KindBundle`, the `bundles/unseen` route) and
+`hey contact threads` lists every thread with its contact (`KindContact`, the contact
+show route's postings page) — a read-through bundle has no unseen threads and no single
+topic, so its mail lives only on the contact's list. The likeliest misuse is handing
+`hey thread read` a bundle row's own id, which the topic route 404s; `loadThread` checks
+a not-found against the bundle route and, when it answers, says what the id really is
+instead of letting "not found" read as "no content".
 
 **`mail.Entry` is one message in a thread**, described by `mail.NewEntry` against the
 message HEY served for it, because a topic's entry list and a message read on its own

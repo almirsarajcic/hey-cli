@@ -1195,6 +1195,9 @@ func (v *mailView) SubnavLeft() tea.Cmd {
 				return v.switchBox(tabIndexes[i-1])
 			}
 		}
+	case mail.KindBundle, mail.KindContact:
+		// Never the current source here: a bundle opens in its own lane over the box,
+		// which the bundleActive guard above already handled.
 	}
 	return nil
 }
@@ -1233,6 +1236,9 @@ func (v *mailView) SubnavRight() tea.Cmd {
 			}
 			return v.openPreviouslySeen()
 		}
+	case mail.KindBundle, mail.KindContact:
+		// Never the current source here: a bundle opens in its own lane over the box,
+		// which the bundleActive guard above already handled.
 	}
 	return nil
 }
