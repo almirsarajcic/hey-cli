@@ -94,6 +94,30 @@ func TestContactLifecycleAndPrivateNote(t *testing.T) {
 	contactWriteJSON(t, "contact", "hide", id)
 }
 
+func TestContactThreads(t *testing.T) {
+	contacts := dataAs[[]smokeContact](t, heyJSON(t, "contact", "list"))
+	if len(contacts) == 0 {
+		skipf(t, "no contacts available to list threads for")
+	}
+	id := contacts[0].ID
+
+	threads := dataAs[struct {
+		ID       int               `json:"id"`
+		Postings []json.RawMessage `json:"postings"`
+		NextPage string            `json:"next_page"`
+	}](t, heyJSON(t, "contact", "threads", intStr(id)))
+	if threads.ID != id {
+		t.Errorf("contact threads returned id %d, want %d", threads.ID, id)
+	}
+
+	limited := dataAs[struct {
+		Postings []json.RawMessage `json:"postings"`
+	}](t, heyJSON(t, "contact", "threads", intStr(id), "--limit", "1"))
+	if len(limited.Postings) > 1 {
+		t.Errorf("expected at most 1 posting with --limit 1, got %d", len(limited.Postings))
+	}
+}
+
 func contactWriteJSON(t *testing.T, args ...string) Response {
 	t.Helper()
 	args = append(args, "--json")
@@ -115,6 +139,7 @@ func TestContactCommandsValidateInput(t *testing.T) {
 	heyFail(t, "contact", "add", "--name", "Sam Rivera")
 	heyFail(t, "contact", "update", "12345")
 	heyFail(t, "contact", "show", "not-an-id")
+	heyFail(t, "contact", "threads", "not-an-id")
 	heyFail(t, "contact", "bundle", "not-an-id")
 	heyFail(t, "contact", "unbundle", "0")
 }

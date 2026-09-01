@@ -127,7 +127,7 @@ func TestContactThreadsListsEveryThread(t *testing.T) {
 			t.Errorf("cursor = %q, want cursor-2", cursor)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":5,"name":"GitHub","email_address":"noreply@github.com",
+		_, _ = io.WriteString(w, `{"id":5,"name":"GitHub","email_address":"noreply@example.com",
 			"entries_title":"All threads with GitHub",
 			"postings":[{"id":401,"summary":"CI failed","app_url":"https://app.hey.com/topics/881"}]}`)
 	}), "contact", "threads", "5", "--page", "cursor-2")

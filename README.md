@@ -318,8 +318,8 @@ hey box list --quiet --jq '.[].id'
 Listing commands also answer `--markdown` for a table, `--styled` to force the human
 rendering when the output is piped, `--ids-only` for one ID per line, and `--count` for a
 bare number. `--ids-only` and `--count` need list data, so they work on `hey box list`,
-`hey box view`, `hey label list`, `hey label view`, `hey collection list`, `hey collection view`,
-`hey workflow list`, `hey workflow view`, `hey clip list`, `hey snippet list`, `hey draft list`, `hey search`, `hey contact list`, `hey screener list`, `hey screener history`, `hey calendar list`,
+`hey box view`, `hey bundle view`, `hey label list`, `hey label view`, `hey collection list`, `hey collection view`,
+`hey workflow list`, `hey workflow view`, `hey clip list`, `hey snippet list`, `hey draft list`, `hey search`, `hey contact list`, `hey contact threads`, `hey screener list`, `hey screener history`, `hey calendar list`,
 `hey event list`, `hey event day`, `hey event week`, `hey todo list`, `hey habit list`,
 `hey timetrack list` and `hey journal list`.
 The
@@ -363,6 +363,7 @@ or through the direct-form escape (`hey box -- list`).
 ```bash
 hey box list                         # list mailboxes
 hey box view imbox                   # list email threads in a box (by name or ID)
+hey bundle view 456                  # list the unseen threads a bundle row groups
 hey label list                       # list labels and their IDs
 hey label view 789 --all             # list all email threads with a label
 hey label add 12345 --to 789         # add a label to a thread
@@ -396,6 +397,7 @@ hey search --from jane@example.com --date last_30_days  # refine a search
 hey search filters                 # list available refinement values
 hey contact list                  # list contacts
 hey contact show 12345            # view a contact and private note
+hey contact threads 12345         # list every thread with a contact, seen and unseen
 hey contact add --name "Jane Doe" --email jane@example.com
 hey contact update 12345 --name "Jane Dawson"
 hey contact hide 12345            # hide without permanently deleting
