@@ -95,19 +95,28 @@ func TestContactLifecycleAndPrivateNote(t *testing.T) {
 }
 
 func TestContactThreads(t *testing.T) {
-	contacts := dataAs[[]smokeContact](t, heyJSON(t, "contact", "list"))
-	if len(contacts) == 0 {
-		skipf(t, "no contacts available to list threads for")
+	// An Imbox sender is a contact with at least one thread on record, so the
+	// listing has something real to answer with.
+	id := 0
+	for _, row := range imboxRows(t) {
+		if row.Creator.ID != 0 {
+			id = row.Creator.ID
+			break
+		}
 	}
-	id := contacts[0].ID
+	if id == 0 {
+		skipf(t, "no imbox sender available to list threads for")
+	}
 
 	threads := dataAs[struct {
 		ID       int               `json:"id"`
 		Postings []json.RawMessage `json:"postings"`
-		NextPage string            `json:"next_page"`
 	}](t, heyJSON(t, "contact", "threads", intStr(id)))
 	if threads.ID != id {
 		t.Errorf("contact threads returned id %d, want %d", threads.ID, id)
+	}
+	if len(threads.Postings) == 0 {
+		t.Error("expected at least one thread with an imbox sender")
 	}
 
 	limited := dataAs[struct {
