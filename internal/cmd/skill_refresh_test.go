@@ -56,7 +56,7 @@ func TestRefreshSkillsUpdatesInstalledCopiesOnce(t *testing.T) {
 	stubVersion(t, "1.2.3")
 	skillPath := installStaleSkill(t, home)
 
-	// A Codex copy must be refreshed too.
+	// A managed Codex copy from an older release must be removed.
 	codexSkill := writeSkillFixture(t, filepath.Join(home, ".codex", "skills", "hey"), "# stale skill", true)
 
 	if !refreshSkillsIfVersionChanged() {
@@ -67,14 +67,12 @@ func TestRefreshSkillsUpdatesInstalledCopiesOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{skillPath, codexSkill} {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(data) != string(embedded) {
-			t.Errorf("%s was not refreshed", path)
-		}
+	data, err := os.ReadFile(skillPath)
+	if err != nil || string(data) != string(embedded) {
+		t.Errorf("%s was not refreshed: %v", skillPath, err)
+	}
+	if _, err := os.Stat(codexSkill); !os.IsNotExist(err) {
+		t.Errorf("legacy Codex skill was not removed: %v", err)
 	}
 
 	stamp, err := os.ReadFile(filepath.Join(filepath.Dir(skillPath), installedVersionFile))
@@ -255,9 +253,9 @@ func TestRefreshSkillsSkipsWithoutConfigDir(t *testing.T) {
 	}
 }
 
-// The sentinel tracks the active Codex home: a marked, stale skill in a
-// Codex home that was inactive during the first post-upgrade run is
-// refreshed as soon as that home becomes active, not at the next release.
+// The sentinel tracks the active Codex home: a marked legacy copy in a home
+// that was inactive during the first post-upgrade run is removed as soon as
+// that home becomes active, not at the next release.
 func TestRefreshSkillsRescansWhenCodexHomeChanges(t *testing.T) {
 	home := refreshFixture(t)
 	stubVersion(t, "9.9.9")
@@ -273,14 +271,13 @@ func TestRefreshSkillsRescansWhenCodexHomeChanges(t *testing.T) {
 	}
 
 	homeB := t.TempDir()
-	staleB := writeSkillFixture(t, filepath.Join(homeB, "skills", "hey"), "# stale skill", true)
+	legacyB := writeSkillFixture(t, filepath.Join(homeB, "skills", "hey"), "# stale skill", true)
 	t.Setenv("CODEX_HOME", homeB)
 	if !refreshSkillsIfVersionChanged() {
 		t.Fatal("switching Codex homes should rescan")
 	}
-	data, err := os.ReadFile(staleB)
-	if err != nil || string(data) == "# stale skill" {
-		t.Errorf("skill in the newly active Codex home was not refreshed: %v", err)
+	if _, err := os.Stat(legacyB); !os.IsNotExist(err) {
+		t.Errorf("legacy skill in the newly active Codex home was not removed: %v", err)
 	}
 	if refreshSkillsIfVersionChanged() {
 		t.Error("stable again: refresh must be a no-op")
