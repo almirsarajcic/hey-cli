@@ -129,7 +129,7 @@ func refreshInstalledSkills() (updated, failed int) {
 	// Current Codex reads the shared ~/.agents skill. A copy from an older
 	// release would produce a duplicate entry, so migrate it away when its
 	// ownership marker proves hey-cli created it.
-	if removed, err := removeLegacyCodexSkill(); err != nil {
+	if removed, err := migrateLegacyCodexSkill(); err != nil {
 		failed++
 	} else if removed {
 		updated++

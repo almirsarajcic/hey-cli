@@ -421,12 +421,12 @@ func installCodexSkill() (string, error) {
 			Manual:  []string{"hey setup codex"},
 		}
 	}
-	if _, err := removeLegacyCodexSkill(); err != nil {
-		return "", err
-	}
 	path := harness.AgentSkillPath()
 	if path == "" || !baselineSkillInstalled() {
 		return "", fmt.Errorf("shared HEY skill is not installed")
+	}
+	if _, err := migrateLegacyCodexSkill(); err != nil {
+		return "", err
 	}
 	return path, nil
 }

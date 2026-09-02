@@ -129,7 +129,7 @@ func runSkillInstall(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if removed, cleanupErr := removeLegacyCodexSkill(); cleanupErr != nil {
+	if removed, cleanupErr := migrateLegacyCodexSkill(); cleanupErr != nil {
 		return apierr.ErrAPI(0, cleanupErr.Error())
 	} else if removed {
 		result["removed_legacy_codex_skill"] = "true"
@@ -296,6 +296,16 @@ func removeLegacyCodexSkill() (bool, error) {
 		return false, nil
 	}
 	return removeOwnedSkillFiles(filepath.Dir(skillPath))
+}
+
+// migrateLegacyCodexSkill removes the old Codex-specific copy only after the
+// shared skill is known healthy. Until then the legacy copy may be the user's
+// only working Codex integration and must remain available.
+func migrateLegacyCodexSkill() (bool, error) {
+	if !baselineSkillInstalled() {
+		return false, nil
+	}
+	return removeLegacyCodexSkill()
 }
 
 // baselineSkillInstalled reports whether ~/.agents/skills/hey/SKILL.md is a
