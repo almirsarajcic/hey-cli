@@ -92,6 +92,8 @@ func skillRefreshLocations() []string {
 	return locations
 }
 
+var refreshSkillFile = writeSkillFile
+
 func refreshInstalledSkills() (updated, failed int) {
 	embedded, err := skills.FS.ReadFile("hey/SKILL.md")
 	if err != nil {
@@ -119,7 +121,7 @@ func refreshInstalledSkills() (updated, failed int) {
 		if !ownedSkillDir(filepath.Dir(location)) {
 			continue
 		}
-		if writeErr := os.WriteFile(location, embedded, 0o644); writeErr == nil { // #nosec G306 -- installed skills are intentionally user-readable
+		if writeErr := refreshSkillFile(location, embedded); writeErr == nil {
 			updated++
 		} else {
 			failed++
@@ -129,10 +131,12 @@ func refreshInstalledSkills() (updated, failed int) {
 	// Current Codex reads the shared ~/.agents skill. A copy from an older
 	// release would produce a duplicate entry, so migrate it away when its
 	// ownership marker proves hey-cli created it.
-	if removed, err := migrateLegacyCodexSkill(); err != nil {
-		failed++
-	} else if removed {
-		updated++
+	if failed == 0 {
+		if removed, err := migrateLegacyCodexSkill(); err != nil {
+			failed++
+		} else if removed {
+			updated++
+		}
 	}
 
 	// Stamp the installed version in the baseline directory only on full

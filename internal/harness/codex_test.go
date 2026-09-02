@@ -68,4 +68,36 @@ func TestCheckCodexSkill(t *testing.T) {
 	if check := CheckCodexSkill(); check.Status != "pass" {
 		t.Errorf("managed skill: %+v", check)
 	}
+
+	legacyDir := filepath.Join(home, ".codex", "skills", "hey")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"SKILL.md":           "# legacy hey",
+		SkillOwnershipMarker: "hey-cli",
+	} {
+		if err := os.WriteFile(filepath.Join(legacyDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if check := CheckCodexSkill(); check.Status != "fail" || check.Hint != "Run: hey setup codex" {
+		t.Errorf("managed duplicate skill: %+v", check)
+	}
+
+	// A CODEX_HOME that aliases ~/.agents makes the old and current paths
+	// identical. That is one skill, not a duplicate.
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".agents"))
+	if check := CheckCodexSkill(); check.Status != "pass" {
+		t.Errorf("aliased current skill: %+v", check)
+	}
+}
+
+func TestCheckCodexSkillReportsMissingAgentSkillsHome(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	check := CheckCodexSkill()
+	if check.Status != "warn" || check.Message != "Cannot determine shared Agent Skills directory" {
+		t.Errorf("check = %+v", check)
+	}
 }

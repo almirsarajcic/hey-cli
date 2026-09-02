@@ -79,7 +79,7 @@ func CheckCodexSkill() *StatusCheck {
 		return &StatusCheck{
 			Name:    "Codex Skill",
 			Status:  "warn",
-			Message: "Cannot determine Codex home directory",
+			Message: "Cannot determine shared Agent Skills directory",
 		}
 	}
 	if _, err := os.Stat(skillPath); err != nil {
@@ -116,6 +116,15 @@ func CheckCodexSkill() *StatusCheck {
 			Status:  "fail",
 			Message: "A skill not written by hey-cli occupies " + skillDir,
 			Hint:    "Move it aside, then run: hey setup codex",
+		}
+	}
+	legacyPath := LegacyCodexSkillPath()
+	if !SameFile(skillPath, legacyPath) && RegularSkillFile(legacyPath) && SkillDirOwned(filepath.Dir(legacyPath)) {
+		return &StatusCheck{
+			Name:    "Codex Skill",
+			Status:  "fail",
+			Message: "Redundant managed skill installed at " + filepath.Dir(legacyPath),
+			Hint:    "Run: hey setup codex",
 		}
 	}
 	return &StatusCheck{

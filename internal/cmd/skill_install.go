@@ -114,6 +114,16 @@ func runSkillInstall(cmd *cobra.Command, args []string) error {
 	result := map[string]string{"skill_path": skillPath}
 	lines := []string{"Installed hey skill to ~/.agents/skills/hey/SKILL.md"}
 
+	// Once the shared replacement is installed, remove a managed legacy copy
+	// before optional agent-specific setup. A later Claude failure must not
+	// leave Codex discovering both copies.
+	if removed, cleanupErr := migrateLegacyCodexSkill(); cleanupErr != nil {
+		return apierr.ErrAPI(0, cleanupErr.Error())
+	} else if removed {
+		result["removed_legacy_codex_skill"] = "true"
+		lines = append(lines, "Removed the redundant managed Codex skill copy")
+	}
+
 	if harness.DetectClaude() {
 		notice, linkErr := linkSkillToClaude()
 		if linkErr != nil {
@@ -127,13 +137,6 @@ func runSkillInstall(cmd *cobra.Command, args []string) error {
 		} else {
 			lines = append(lines, "Symlinked ~/.claude/skills/hey → ../../.agents/skills/hey")
 		}
-	}
-
-	if removed, cleanupErr := migrateLegacyCodexSkill(); cleanupErr != nil {
-		return apierr.ErrAPI(0, cleanupErr.Error())
-	} else if removed {
-		result["removed_legacy_codex_skill"] = "true"
-		lines = append(lines, "Removed the redundant managed Codex skill copy")
 	}
 
 	if writer.IsStyled() {
@@ -303,6 +306,9 @@ func removeLegacyCodexSkill() (bool, error) {
 // only working Codex integration and must remain available.
 func migrateLegacyCodexSkill() (bool, error) {
 	if !baselineSkillInstalled() {
+		return false, nil
+	}
+	if harness.SameFile(harness.AgentSkillPath(), harness.LegacyCodexSkillPath()) {
 		return false, nil
 	}
 	return removeLegacyCodexSkill()
