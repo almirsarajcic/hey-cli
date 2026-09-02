@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/basecamp/hey-cli/internal/auth"
+	"github.com/basecamp/hey-cli/internal/harness"
 	"github.com/basecamp/hey-cli/internal/output"
 )
 
@@ -733,6 +734,35 @@ func TestSetupRepeatKeepsDetectedConnectedAgentsVisible(t *testing.T) {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("repeat setup missing %q:\n%s", want, stdout)
 		}
+	}
+}
+
+func TestSetupRepeatMigratesManagedLegacyCodexSkill(t *testing.T) {
+	isolateAgents(t)
+	stubInteractive(t, true)
+	server := identityServer(t)
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runAuthCommand(t, home, server.URL, "", true, "auth", "login", "--cookie", "session-cookie"); err != nil {
+		t.Fatalf("auth login: %v", err)
+	}
+	if _, _, err := runAuthCommand(t, home, server.URL, "", true, "setup"); err != nil {
+		t.Fatalf("initial setup: %v", err)
+	}
+
+	legacy := filepath.Join(home, ".codex", "skills", "hey")
+	writeSkillFixture(t, legacy, "# managed legacy duplicate", true)
+	if check := harness.CheckCodexSkill(); check.Status != "fail" {
+		t.Fatalf("preflight did not notice managed duplicate: %+v", check)
+	}
+
+	if _, _, err := runAuthCommand(t, home, server.URL, "", true, "setup"); err != nil {
+		t.Fatalf("repeat setup: %v", err)
+	}
+	if _, err := os.Lstat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("repeat setup left managed legacy duplicate: %v", err)
 	}
 }
 

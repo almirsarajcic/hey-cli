@@ -199,6 +199,9 @@ func TestSkillInstallPreservesUnmanagedLegacyCodexSkill(t *testing.T) {
 	if got, err := os.ReadFile(filepath.Join(legacy, skillFilename)); err != nil || !bytes.Equal(got, custom) {
 		t.Fatalf("unmanaged legacy skill changed: %q, %v", got, err)
 	}
+	if ownedSkillDir(legacy) {
+		t.Error("unmanaged legacy Codex skill was claimed")
+	}
 }
 
 func TestCodexMigrationPreservesLegacySkillWithoutSharedBaseline(t *testing.T) {
@@ -211,6 +214,17 @@ func TestCodexMigrationPreservesLegacySkillWithoutSharedBaseline(t *testing.T) {
 	}
 	if got, err := os.ReadFile(filepath.Join(legacy, skillFilename)); err != nil || string(got) != "# only working skill" {
 		t.Fatalf("legacy-only skill changed: %q, %v", got, err)
+	}
+}
+
+func TestCodexInstallReportsMissingSharedAgentSkillsHome(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+
+	if _, err := installCodexSkill(); err == nil || err.Error() != "cannot determine shared Agent Skills directory" {
+		t.Fatalf("installCodexSkill error = %v", err)
 	}
 }
 
@@ -238,6 +252,42 @@ func TestSkillInstallFailurePreservesManagedLegacyCodexSkill(t *testing.T) {
 	}
 	if got, err := os.ReadFile(filepath.Join(legacy, skillFilename)); err != nil || string(got) != "# only working skill" {
 		t.Fatalf("legacy skill changed after failed baseline install: %q, %v", got, err)
+	}
+}
+
+func TestSkillInstallDoesNotRemoveSharedSkillWhenCodexHomeAliasesAgents(t *testing.T) {
+	home := agentHome(t)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".agents"))
+	jsonWriter(t)
+
+	if err := runSkillInstall(newSkillInstallCommand(), nil); err != nil {
+		t.Fatal(err)
+	}
+	shared := filepath.Join(home, ".agents", "skills", "hey")
+	if !baselineSkillInstalled() {
+		t.Fatal("shared skill was removed as its own legacy copy")
+	}
+	if !ownedSkillDir(shared) {
+		t.Fatal("shared skill lost its ownership marker")
+	}
+}
+
+func TestSkillInstallMigratesLegacyCopyBeforeClaudeSetupFailure(t *testing.T) {
+	home := agentHome(t, ".codex", ".claude/skills/hey")
+	legacy := filepath.Join(home, ".codex", "skills", "hey")
+	writeSkillFixture(t, legacy, "# legacy", true)
+	// A populated user-owned Claude directory makes the optional Claude step
+	// fail after the shared baseline succeeds.
+	if err := os.WriteFile(filepath.Join(home, ".claude", "skills", "hey", "keep"), []byte("mine"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jsonWriter(t)
+
+	if err := runSkillInstall(newSkillInstallCommand(), nil); err == nil {
+		t.Fatal("install unexpectedly succeeded through user-owned Claude skill")
+	}
+	if _, err := os.Lstat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("managed legacy Codex copy remains after shared install: %v", err)
 	}
 }
 

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -142,6 +143,38 @@ func TestRefreshPreservesLegacyCodexSkillWhenSharedBaselineIsInvalid(t *testing.
 	}
 	if got, err := os.ReadFile(legacy); err != nil || string(got) != "# only working skill" {
 		t.Fatalf("legacy skill changed while the shared baseline was invalid: %q, %v", got, err)
+	}
+}
+
+func TestRefreshFailurePreservesManagedLegacyCodexSkill(t *testing.T) {
+	home := refreshFixture(t)
+	installStaleSkill(t, home)
+	legacy := writeSkillFixture(t, filepath.Join(home, ".codex", "skills", "hey"), "# working legacy skill", true)
+
+	originalWrite := refreshSkillFile
+	refreshSkillFile = func(string, []byte) error { return errors.New("disk full") }
+	t.Cleanup(func() { refreshSkillFile = originalWrite })
+
+	updated, failed := refreshInstalledSkills()
+	if updated != 0 || failed == 0 {
+		t.Fatalf("refresh = %d updated, %d failed", updated, failed)
+	}
+	if got, err := os.ReadFile(legacy); err != nil || string(got) != "# working legacy skill" {
+		t.Fatalf("legacy skill changed after failed refresh: %q, %v", got, err)
+	}
+}
+
+func TestRefreshDoesNotRemoveSharedSkillWhenCodexHomeAliasesAgents(t *testing.T) {
+	home := refreshFixture(t)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".agents"))
+	skill := installStaleSkill(t, home)
+
+	updated, failed := refreshInstalledSkills()
+	if updated == 0 || failed != 0 {
+		t.Fatalf("refresh = %d updated, %d failed", updated, failed)
+	}
+	if _, err := os.Stat(skill); err != nil {
+		t.Fatalf("shared skill removed as its own legacy copy: %v", err)
 	}
 }
 

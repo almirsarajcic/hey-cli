@@ -422,7 +422,10 @@ func installCodexSkill() (string, error) {
 		}
 	}
 	path := harness.AgentSkillPath()
-	if path == "" || !baselineSkillInstalled() {
+	if path == "" {
+		return "", fmt.Errorf("cannot determine shared Agent Skills directory")
+	}
+	if !baselineSkillInstalled() {
 		return "", fmt.Errorf("shared HEY skill is not installed")
 	}
 	if _, err := migrateLegacyCodexSkill(); err != nil {

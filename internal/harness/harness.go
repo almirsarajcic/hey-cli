@@ -43,6 +43,23 @@ func RegularSkillFile(path string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
+// SameFile reports whether two paths resolve to the same existing file. The
+// clean-path fallback also handles the useful missing-file case without
+// following or inventing any filesystem state.
+func SameFile(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA == nil && errB == nil && filepath.Clean(absA) == filepath.Clean(absB) {
+		return true
+	}
+	infoA, errA := os.Stat(a)
+	infoB, errB := os.Stat(b)
+	return errA == nil && errB == nil && os.SameFile(infoA, infoB)
+}
+
 // StatusCheck represents a single agent integration health check result.
 type StatusCheck struct {
 	Name    string `json:"name"`
