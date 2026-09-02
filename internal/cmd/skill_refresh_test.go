@@ -106,6 +106,45 @@ func TestRefreshSkillsWithoutInstallNeverInstalls(t *testing.T) {
 	}
 }
 
+func TestRefreshPreservesLegacyCodexSkillWithoutSharedBaseline(t *testing.T) {
+	home := refreshFixture(t)
+	stubVersion(t, "1.2.3")
+	legacy := writeSkillFixture(t, filepath.Join(home, ".codex", "skills", "hey"), "# only working skill", true)
+
+	if refreshSkillsIfVersionChanged() {
+		t.Error("legacy-only installation should not be migrated without a healthy shared skill")
+	}
+	if got, err := os.ReadFile(legacy); err != nil || string(got) != "# only working skill" {
+		t.Fatalf("legacy-only skill changed: %q, %v", got, err)
+	}
+}
+
+func TestRefreshPreservesLegacyCodexSkillWhenSharedBaselineIsInvalid(t *testing.T) {
+	home := refreshFixture(t)
+	stubVersion(t, "1.2.3")
+	legacy := writeSkillFixture(t, filepath.Join(home, ".codex", "skills", "hey"), "# only working skill", true)
+
+	baseline := filepath.Join(home, ".agents", "skills", "hey")
+	if err := os.MkdirAll(baseline, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeOwnershipMarker(baseline)
+	target := filepath.Join(home, "user-skill.md")
+	if err := os.WriteFile(target, []byte("# user skill"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(baseline, skillFilename)); err != nil {
+		t.Fatal(err)
+	}
+
+	if refreshSkillsIfVersionChanged() {
+		t.Error("invalid shared baseline should not trigger a completed migration")
+	}
+	if got, err := os.ReadFile(legacy); err != nil || string(got) != "# only working skill" {
+		t.Fatalf("legacy skill changed while the shared baseline was invalid: %q, %v", got, err)
+	}
+}
+
 // Refresh never touches symlinks: a dangling ~/.claude/skills/hey — a user's
 // link to a volume that is merely unmounted right now — survives untouched,
 // even when a marked baseline exists next to it.

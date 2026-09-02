@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/basecamp/hey-cli/internal/output"
@@ -197,6 +198,46 @@ func TestSkillInstallPreservesUnmanagedLegacyCodexSkill(t *testing.T) {
 	}
 	if got, err := os.ReadFile(filepath.Join(legacy, skillFilename)); err != nil || !bytes.Equal(got, custom) {
 		t.Fatalf("unmanaged legacy skill changed: %q, %v", got, err)
+	}
+}
+
+func TestCodexMigrationPreservesLegacySkillWithoutSharedBaseline(t *testing.T) {
+	home := agentHome(t, ".codex")
+	legacy := filepath.Join(home, ".codex", "skills", "hey")
+	writeSkillFixture(t, legacy, "# only working skill", true)
+
+	if _, err := installCodexSkill(); err == nil || !strings.Contains(err.Error(), "shared HEY skill is not installed") {
+		t.Fatalf("installCodexSkill error = %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(legacy, skillFilename)); err != nil || string(got) != "# only working skill" {
+		t.Fatalf("legacy-only skill changed: %q, %v", got, err)
+	}
+}
+
+func TestSkillInstallFailurePreservesManagedLegacyCodexSkill(t *testing.T) {
+	home := agentHome(t, ".codex")
+	legacy := filepath.Join(home, ".codex", "skills", "hey")
+	writeSkillFixture(t, legacy, "# only working skill", true)
+
+	baseline := filepath.Join(home, ".agents", "skills", "hey")
+	if err := os.MkdirAll(baseline, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeOwnershipMarker(baseline)
+	precious := filepath.Join(home, "user-skill.md")
+	if err := os.WriteFile(precious, []byte("# user skill"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(precious, filepath.Join(baseline, skillFilename)); err != nil {
+		t.Fatal(err)
+	}
+	jsonWriter(t)
+
+	if err := runSkillInstall(newSkillInstallCommand(), nil); err == nil {
+		t.Fatal("install succeeded over a non-regular baseline skill")
+	}
+	if got, err := os.ReadFile(filepath.Join(legacy, skillFilename)); err != nil || string(got) != "# only working skill" {
+		t.Fatalf("legacy skill changed after failed baseline install: %q, %v", got, err)
 	}
 }
 
