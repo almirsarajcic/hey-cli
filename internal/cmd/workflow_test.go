@@ -191,6 +191,26 @@ func TestWorkflowStageViewListsThreads(t *testing.T) {
 	}
 }
 
+func TestWorkflowStageViewOutputFormats(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<section id="container_workflow_stage_5512"><h2>Applied</h2><div id="topic_4471829" data-identifier="91"><h3>Application</h3><p class="card__detail">3 emails</p></div></section>`)
+	})
+
+	ids, err := runFormattedCommand(t, handler, []string{"--ids-only"}, "workflow", "stage", "view", "8801", "5512")
+	if err != nil || ids != "4471829\n" {
+		t.Errorf("ids = %q, err = %v", ids, err)
+	}
+	count, err := runFormattedCommand(t, handler, []string{"--count"}, "workflow", "stage", "view", "8801", "5512")
+	if err != nil || count != "1\n" {
+		t.Errorf("count = %q, err = %v", count, err)
+	}
+	styled, err := runStyledCommand(t, handler, "workflow", "stage", "view", "8801", "5512")
+	if err != nil || !strings.Contains(styled, "Thread") || !strings.Contains(styled, "Application") || !strings.Contains(styled, "3") {
+		t.Errorf("styled = %q, err = %v", styled, err)
+	}
+}
+
 func TestWorkflowMarkdownEscapesMetadata(t *testing.T) {
 	cmd := newWorkflowCommand().cmd
 	var output strings.Builder

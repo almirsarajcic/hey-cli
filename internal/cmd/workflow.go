@@ -502,6 +502,17 @@ func (c *workflowStageViewCommand) run(cmd *cobra.Command, args []string) error 
 		table.print()
 		return nil
 	}
+	format := writer.EffectiveFormat()
+	if format == output.FormatIDs {
+		for _, topic := range view.Topics {
+			fmt.Fprintln(cmd.OutOrStdout(), topic.TopicID)
+		}
+		return nil
+	}
+	if format == output.FormatCount {
+		fmt.Fprintln(cmd.OutOrStdout(), len(view.Topics))
+		return nil
+	}
 	return writeOK(view, output.WithSummary(fmt.Sprintf("%d %s in workflow stage %s", len(view.Topics), threadNoun(len(view.Topics)), terminal.SanitizeLine(view.Name))), output.WithBreadcrumbs(output.Breadcrumb{Action: "read", Command: "hey thread read <thread-id>", Description: "Read an email thread"}))
 }
 
