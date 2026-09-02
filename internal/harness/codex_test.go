@@ -35,8 +35,8 @@ func TestCodexHomeHonorsEnvOverride(t *testing.T) {
 	if got := CodexHome(); got != override {
 		t.Errorf("CodexHome() = %q, want %q", got, override)
 	}
-	if got, want := CodexSkillPath(), filepath.Join(override, "skills", "hey", "SKILL.md"); got != want {
-		t.Errorf("CodexSkillPath() = %q, want %q", got, want)
+	if got, want := LegacyCodexSkillPath(), filepath.Join(override, "skills", "hey", "SKILL.md"); got != want {
+		t.Errorf("LegacyCodexSkillPath() = %q, want %q", got, want)
 	}
 }
 
@@ -49,7 +49,7 @@ func TestCheckCodexSkill(t *testing.T) {
 		t.Errorf("missing skill: %+v", check)
 	}
 
-	skillDir := filepath.Join(home, ".codex", "skills", "hey")
+	skillDir := filepath.Join(home, ".agents", "skills", "hey")
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

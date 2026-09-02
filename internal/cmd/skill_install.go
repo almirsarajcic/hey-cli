@@ -100,7 +100,7 @@ func newSkillInstallCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "install",
 		Short: "Install the hey skill globally for your coding agents",
-		Long:  "Copies the embedded SKILL.md to ~/.agents/skills/hey/, links it into ~/.claude/skills/hey when Claude Code is installed, and copies it for Codex when Codex is installed.",
+		Long:  "Copies the embedded SKILL.md to ~/.agents/skills/hey/ and links it into ~/.claude/skills/hey when Claude Code is installed. Codex discovers the shared skill directly.",
 		RunE:  runSkillInstall,
 	}
 }
@@ -129,13 +129,11 @@ func runSkillInstall(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if harness.DetectCodex() {
-		codexPath, codexErr := installSkillToCodex()
-		if codexErr != nil {
-			return apierr.ErrAPI(0, codexErr.Error())
-		}
-		result["codex_skill_path"] = codexPath
-		lines = append(lines, "Copied skill to "+codexPath)
+	if removed, cleanupErr := removeLegacyCodexSkill(); cleanupErr != nil {
+		return apierr.ErrAPI(0, cleanupErr.Error())
+	} else if removed {
+		result["removed_legacy_codex_skill"] = "true"
+		lines = append(lines, "Removed the redundant managed Codex skill copy")
 	}
 
 	if writer.IsStyled() {
@@ -289,26 +287,15 @@ func isManagedSkillCopy(path string) bool {
 	return sawMarker
 }
 
-// installSkillToCodex copies the embedded SKILL.md into Codex's skills
-// directory ($CODEX_HOME or ~/.codex). Codex does not follow the shared
-// ~/.agents layout, so this is a copy rather than a link.
-func installSkillToCodex() (string, error) {
-	skillPath := harness.CodexSkillPath()
+// removeLegacyCodexSkill removes only the redundant Codex-specific copy
+// written by an older hey-cli. An unmarked directory is user-owned and stays
+// untouched; Codex will continue to discover it alongside the shared skill.
+func removeLegacyCodexSkill() (bool, error) {
+	skillPath := harness.LegacyCodexSkillPath()
 	if skillPath == "" {
-		return "", fmt.Errorf("cannot determine Codex home directory")
+		return false, nil
 	}
-
-	data, err := skills.FS.ReadFile("hey/SKILL.md")
-	if err != nil {
-		return "", fmt.Errorf("reading embedded skill: %w", err)
-	}
-	if err := claimSkillDir(filepath.Dir(skillPath)); err != nil {
-		return "", err
-	}
-	if err := writeSkillFile(skillPath, data); err != nil {
-		return "", fmt.Errorf("writing Codex skill file: %w", err)
-	}
-	return skillPath, nil
+	return removeOwnedSkillFiles(filepath.Dir(skillPath))
 }
 
 // baselineSkillInstalled reports whether ~/.agents/skills/hey/SKILL.md is a

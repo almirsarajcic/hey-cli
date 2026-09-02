@@ -11,6 +11,16 @@ import (
 // skill: present, but not a working hey integration.
 const SkillOwnershipMarker = ".managed-by-hey-cli"
 
+// AgentSkillPath returns the shared location used by agents that implement
+// the Agent Skills convention.
+func AgentSkillPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Clean(home), ".agents", "skills", "hey", "SKILL.md")
+}
+
 // SkillDirOwned reports whether hey-cli wrote the skill directory at dir.
 // The marker itself must be a regular file — the same shape rule as every
 // other skill file, so a planted symlink or directory in the marker's name

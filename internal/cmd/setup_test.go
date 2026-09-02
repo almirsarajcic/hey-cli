@@ -787,10 +787,9 @@ func TestSetupJSONStaleCredentialsReportIncomplete(t *testing.T) {
 	}
 }
 
-// The wizard records a handler refusal as an issue even when the health
-// snapshot alone would miss it, so the warning remains visible in the
-// finished setup flow.
-func TestSetupWizardRecordsHandlerFailures(t *testing.T) {
+// A user-authored skill at the old Codex-specific path does not prevent the
+// wizard from connecting Codex through the shared skill, and is preserved.
+func TestSetupWizardPreservesUnmanagedLegacyCodexSkill(t *testing.T) {
 	isolateAgents(t)
 	server := identityServer(t)
 	configHome := t.TempDir()
@@ -811,16 +810,12 @@ func TestSetupWizardRecordsHandlerFailures(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 	data := wizardData(t, response)
-	if data["status"] != "incomplete" {
-		t.Errorf("status = %v, want incomplete over a refused install", data["status"])
+	if data["status"] != "complete" {
+		t.Errorf("status = %v, want complete with the shared skill", data["status"])
 	}
 	rawIssues := data["issues"].([]any)
-	checks := make([]string, 0, len(rawIssues))
-	for _, raw := range rawIssues {
-		checks = append(checks, raw.(map[string]any)["check"].(string))
-	}
-	if !contains(checks, "Codex setup failed") {
-		t.Errorf("handler failure not recorded: %v", checks)
+	if len(rawIssues) != 0 {
+		t.Errorf("issues = %v, want none", rawIssues)
 	}
 	if got, _ := os.ReadFile(filepath.Join(codexSkill, "SKILL.md")); string(got) != custom {
 		t.Errorf("user skill changed: %q", got)
