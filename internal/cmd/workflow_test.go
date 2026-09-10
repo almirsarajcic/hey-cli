@@ -205,6 +205,11 @@ func TestWorkflowStageViewOutputFormats(t *testing.T) {
 	if err != nil || count != "1\n" {
 		t.Errorf("count = %q, err = %v", count, err)
 	}
+	markdown, err := runFormattedCommand(t, handler, []string{"--markdown"}, "workflow", "stage", "view", "8801", "5512")
+	wantMarkdown := "| entry_count | subject | topic_id |\n| --- | --- | --- |\n| 3 | Application | 4471829 |\n"
+	if err != nil || markdown != wantMarkdown {
+		t.Errorf("markdown = %q, err = %v", markdown, err)
+	}
 	styled, err := runStyledCommand(t, handler, "workflow", "stage", "view", "8801", "5512")
 	if err != nil || !strings.Contains(styled, "Thread") || !strings.Contains(styled, "Application") || !strings.Contains(styled, "3") {
 		t.Errorf("styled = %q, err = %v", styled, err)

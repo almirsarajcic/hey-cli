@@ -503,6 +503,9 @@ func (c *workflowStageViewCommand) run(cmd *cobra.Command, args []string) error 
 		return nil
 	}
 	format := writer.EffectiveFormat()
+	if format == output.FormatMarkdown {
+		return writeOK(view.Topics)
+	}
 	if format == output.FormatIDs {
 		for _, topic := range view.Topics {
 			fmt.Fprintln(cmd.OutOrStdout(), topic.TopicID)
