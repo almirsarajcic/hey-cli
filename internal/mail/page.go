@@ -29,6 +29,10 @@ func ReadPage(ctx context.Context, client *hey.Client, source Source, cursor str
 		return readFolderPage(ctx, client, source, cursor)
 	case KindCollection:
 		return readCollectionPage(ctx, client, source, cursor)
+	case KindBundle:
+		return readBundlePage(ctx, client, source, cursor)
+	case KindContact:
+		return readContactPage(ctx, client, source, cursor)
 	default:
 		return Page{}, fmt.Errorf("mail: source %d has no readable kind %q", source.ID, source.Kind)
 	}
@@ -134,6 +138,31 @@ func readFolderPage(ctx context.Context, client *hey.Client, source Source, curs
 		return Page{}, fmt.Errorf("mail: label %d answered no page at cursor %q", source.ID, cursor)
 	}
 	return Page{Postings: result.Folder.Postings, Cursor: result.NextPage, Total: result.TotalCount}, nil
+}
+
+// readBundlePage reads one page of the unseen postings a bundle posting groups. The
+// cursor is a geared_pagination cursor, as a label's is.
+func readBundlePage(ctx context.Context, client *hey.Client, source Source, cursor string) (Page, error) {
+	result, err := client.Postings().BundleUnseenPage(ctx, source.ID, cursor)
+	if err != nil {
+		return Page{}, err
+	}
+	if result == nil {
+		return Page{}, fmt.Errorf("mail: bundle %d answered no page at cursor %q", source.ID, cursor)
+	}
+	return Page{Postings: result.Postings, Cursor: result.NextPage}, nil
+}
+
+// readContactPage reads one page of the threads a contact is on.
+func readContactPage(ctx context.Context, client *hey.Client, source Source, cursor string) (Page, error) {
+	result, err := client.Contacts().ThreadsPage(ctx, source.ID, cursor)
+	if err != nil {
+		return Page{}, err
+	}
+	if result == nil || result.Contact == nil {
+		return Page{}, fmt.Errorf("mail: contact %d answered no page at cursor %q", source.ID, cursor)
+	}
+	return Page{Postings: result.Contact.Postings, Cursor: result.NextPage}, nil
 }
 
 func readCollectionPage(ctx context.Context, client *hey.Client, source Source, cursor string) (Page, error) {

@@ -30,6 +30,7 @@ func newContactsCommand() *contactsCommand {
 
 	contactsCommand.cmd.AddCommand(newContactsListCommand().cmd)
 	contactsCommand.cmd.AddCommand(newContactsShowCommand().cmd)
+	contactsCommand.cmd.AddCommand(newContactsThreadsCommand().cmd)
 	contactsCommand.cmd.AddCommand(newContactsAddCommand().cmd)
 	contactsCommand.cmd.AddCommand(newContactsUpdateCommand().cmd)
 	contactsCommand.cmd.AddCommand(newContactsHideCommand().cmd)

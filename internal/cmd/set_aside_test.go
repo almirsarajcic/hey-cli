@@ -1,0 +1,491 @@
+package cmd
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"strings"
+	"testing"
+)
+
+type recordedSetAside struct {
+	requests []string
+	bodies   []map[string]any
+}
+
+// setAsideServer is a Set Aside of three threads over two pages, two of them in group 42,
+// and a group index that also lists an empty group 43.
+func setAsideServer(recorded *recordedSetAside) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recorded.requests = append(recorded.requests, r.Method+" "+r.URL.Path)
+		if r.Body != nil {
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+				recorded.bodies = append(recorded.bodies, body)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /set_aside.json":
+			if r.URL.Query().Get("page") == "page-2" {
+				_, _ = io.WriteString(w, `{"id":3,"kind":"asidebox","name":"Set Aside","postings":[
+					{"id":103,"kind":"topic","summary":"Tile samples","box_group_id":42,"app_url":"https://app.hey.com/topics/503","creator":{"name":"Marta Novak"}}
+				]}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"id":3,"kind":"asidebox","name":"Set Aside","next_history_url":"https://app.hey.com/set_aside.json?page=page-2","postings":[
+				{"id":101,"kind":"topic","summary":"Cabinet estimate","box_group_id":42,"app_url":"https://app.hey.com/topics/501","creator":{"name":"Jane Doe"}},
+				{"id":102,"kind":"topic","summary":"Flight confirmation","app_url":"https://app.hey.com/topics/502","creator":{"name":"Ada Lovelace"}}
+			]}`)
+		case "GET /boxes.json":
+			_, _ = io.WriteString(w, `[{"id":1,"kind":"imbox","name":"Imbox"},{"id":3,"kind":"asidebox","name":"Set Aside"}]`)
+		case "GET /boxes/3/groups.json":
+			_, _ = io.WriteString(w, `{"box_groups":[{"id":43},{"id":42}]}`)
+		case "GET /boxes/3/groups/42.json":
+			w.Header().Set("X-Total-Count", "2")
+			if r.URL.Query().Get("page") == "group-page-2" {
+				_, _ = io.WriteString(w, `{"id":42,"box_id":3,"postings":[
+					{"id":103,"kind":"topic","summary":"Tile samples","box_group_id":42,"app_url":"https://app.hey.com/topics/503","creator":{"name":"Marta Novak"}}
+				]}`)
+				return
+			}
+			w.Header().Set("Link", `<http://`+r.Host+`/boxes/3/groups/42.json?page=group-page-2>; rel="next"`)
+			_, _ = io.WriteString(w, `{"id":42,"box_id":3,"postings":[
+				{"id":101,"kind":"topic","summary":"Cabinet estimate","box_group_id":42,"app_url":"https://app.hey.com/topics/501","creator":{"name":"Jane Doe"}}
+			]}`)
+		case "GET /boxes/3/groups/43.json":
+			w.Header().Set("X-Total-Count", "0")
+			_, _ = io.WriteString(w, `{"id":43,"box_id":3,"postings":[]}`)
+		case "POST /boxes/3/groups.json":
+			_, _ = io.WriteString(w, `{"id":44}`)
+		case "DELETE /boxes/3/groups/42.json":
+			w.WriteHeader(http.StatusNoContent)
+		case "POST /postings/moves.json", "POST /postings/box_groups.json", "DELETE /postings/box_groups.json":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+func TestSetAsideViewCarriesGroups(t *testing.T) {
+	recorded := &recordedSetAside{}
+	response, err := runJSONCommand(t, setAsideServer(recorded), "set-aside", "view", "--all")
+	if err != nil {
+		t.Fatalf("execute set-aside view: %v", err)
+	}
+	if response.Summary != "3 threads in Set Aside" {
+		t.Errorf("summary = %q", response.Summary)
+	}
+	box := response.Data.(map[string]any)
+	postings := box["postings"].([]any)
+	if len(postings) != 3 {
+		t.Fatalf("postings = %d, want 3", len(postings))
+	}
+	first := postings[0].(map[string]any)
+	if first["id"] != float64(101) || first["topic_id"] != float64(501) || first["box_group_id"] != float64(42) {
+		t.Errorf("first posting = %#v", first)
+	}
+	if _, grouped := postings[1].(map[string]any)["box_group_id"]; grouped {
+		t.Errorf("ungrouped posting carries box_group_id: %#v", postings[1])
+	}
+
+	styled, err := runStyledCommand(t, setAsideServer(&recordedSetAside{}), "set-aside", "view")
+	if err != nil {
+		t.Fatalf("execute styled set-aside view: %v", err)
+	}
+	if !strings.Contains(styled, "Group") || !strings.Contains(styled, "42") || !strings.Contains(styled, "Cabinet estimate") {
+		t.Errorf("styled output = %q, want a Group column", styled)
+	}
+
+	markdown, err := runFormattedCommand(t, setAsideServer(&recordedSetAside{}), []string{"--markdown"}, "set-aside", "view")
+	if err != nil {
+		t.Fatalf("execute markdown set-aside view: %v", err)
+	}
+	if !strings.Contains(markdown, "| group |") {
+		t.Errorf("markdown output = %q, want a group column", markdown)
+	}
+}
+
+func TestSetAsideViewMarkdownKeepsGroupColumnWhenNothingIsGrouped(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":3,"kind":"asidebox","name":"Set Aside","postings":[
+			{"id":102,"kind":"topic","summary":"Flight confirmation","creator":{"name":"Ada Lovelace"}}
+		]}`)
+	})
+	markdown, err := runFormattedCommand(t, handler, []string{"--markdown"}, "set-aside", "view")
+	if err != nil {
+		t.Fatalf("execute markdown set-aside view: %v", err)
+	}
+	if !strings.Contains(markdown, "| group |") {
+		t.Errorf("markdown output = %q, want a group column even with nothing grouped", markdown)
+	}
+}
+
+func TestBoxViewHasNoGroupColumn(t *testing.T) {
+	styled, err := runStyledCommand(t, setAsideServer(&recordedSetAside{}), "box", "view", "set aside")
+	if err != nil {
+		t.Fatalf("execute box view: %v", err)
+	}
+	if strings.Contains(styled, "Group") {
+		t.Errorf("box view styled output = %q, want no Group column", styled)
+	}
+}
+
+func TestSetAsideGroupList(t *testing.T) {
+	recorded := &recordedSetAside{}
+	response, err := runJSONCommand(t, setAsideServer(recorded), "set-aside", "group", "list")
+	if err != nil {
+		t.Fatalf("execute group list: %v", err)
+	}
+	want := []string{"GET /boxes.json", "GET /boxes/3/groups.json", "GET /boxes/3/groups/43.json", "GET /boxes/3/groups/42.json"}
+	if strings.Join(recorded.requests, ",") != strings.Join(want, ",") {
+		t.Errorf("requests = %v, want %v", recorded.requests, want)
+	}
+	if response.Summary != "2 groups in Set Aside" || response.Notice != "" {
+		t.Errorf("response = %#v", response)
+	}
+	groups := response.Data.([]any)
+	if len(groups) != 2 {
+		t.Fatalf("groups = %#v, want two", groups)
+	}
+	full := groups[0].(map[string]any)
+	if full["id"] != float64(42) || full["thread_count"] != float64(2) {
+		t.Errorf("group 42 = %#v", full)
+	}
+	empty := groups[1].(map[string]any)
+	if empty["id"] != float64(43) || empty["thread_count"] != float64(0) {
+		t.Errorf("group 43 = %#v", empty)
+	}
+
+	styled, err := runStyledCommand(t, setAsideServer(&recordedSetAside{}), "set-aside", "group", "list")
+	if err != nil {
+		t.Fatalf("execute styled group list: %v", err)
+	}
+	if !strings.Contains(styled, "Threads") || !strings.Contains(styled, "42") || !strings.Contains(styled, "43") {
+		t.Errorf("styled output = %q", styled)
+	}
+
+	ids, err := runFormattedCommand(t, setAsideServer(&recordedSetAside{}), []string{"--ids-only"}, "set-aside", "group", "list")
+	if err != nil || ids != "42\n43\n" {
+		t.Errorf("ids output = %q, err = %v", ids, err)
+	}
+	count, err := runFormattedCommand(t, setAsideServer(&recordedSetAside{}), []string{"--count"}, "set-aside", "group", "list")
+	if err != nil || count != "2\n" {
+		t.Errorf("count output = %q, err = %v", count, err)
+	}
+}
+
+// HEY removes a group when its last thread leaves, so a group the index named can be gone
+// by the time it is read. The listing leaves it out rather than failing.
+func TestSetAsideGroupListSkipsAGroupThatVanished(t *testing.T) {
+	recorded := &recordedSetAside{}
+	inner := setAsideServer(recorded)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /boxes/3/groups.json":
+			recorded.requests = append(recorded.requests, "GET /boxes/3/groups.json")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"box_groups":[{"id":42},{"id":44}]}`)
+		case "GET /boxes/3/groups/44.json":
+			recorded.requests = append(recorded.requests, "GET /boxes/3/groups/44.json")
+			http.NotFound(w, r)
+		default:
+			inner.ServeHTTP(w, r)
+		}
+	})
+
+	response, err := runJSONCommand(t, handler, "set-aside", "group", "list")
+	if err != nil {
+		t.Fatalf("execute group list: %v", err)
+	}
+	want := []string{"GET /boxes.json", "GET /boxes/3/groups.json", "GET /boxes/3/groups/42.json", "GET /boxes/3/groups/44.json"}
+	if strings.Join(recorded.requests, ",") != strings.Join(want, ",") {
+		t.Errorf("requests = %v, want %v", recorded.requests, want)
+	}
+	groups := response.Data.([]any)
+	if len(groups) != 1 || groups[0].(map[string]any)["id"] != float64(42) {
+		t.Errorf("groups = %#v, want only group 42", groups)
+	}
+	if response.Summary != "1 group in Set Aside" {
+		t.Errorf("summary = %q", response.Summary)
+	}
+}
+
+func TestSetAsideGroupView(t *testing.T) {
+	recorded := &recordedSetAside{}
+	response, err := runJSONCommand(t, setAsideServer(recorded), "set-aside", "group", "view", "42", "--all")
+	if err != nil {
+		t.Fatalf("execute group view: %v", err)
+	}
+	want := []string{"GET /boxes.json", "GET /boxes/3/groups/42.json", "GET /boxes/3/groups/42.json"}
+	if strings.Join(recorded.requests, ",") != strings.Join(want, ",") {
+		t.Errorf("requests = %v, want %v", recorded.requests, want)
+	}
+	if response.Summary != "2 threads in Set Aside group 42" {
+		t.Errorf("summary = %q", response.Summary)
+	}
+	group := response.Data.(map[string]any)
+	if group["id"] != float64(42) || group["box_id"] != float64(3) || group["total_count"] != float64(2) {
+		t.Errorf("group = %#v", group)
+	}
+	postings := group["postings"].([]any)
+	if len(postings) != 2 {
+		t.Fatalf("postings = %#v, want two", postings)
+	}
+	second := postings[1].(map[string]any)
+	if second["id"] != float64(103) || second["topic_id"] != float64(503) {
+		t.Errorf("second posting = %#v", second)
+	}
+
+	firstPage, err := runJSONCommand(t, setAsideServer(&recordedSetAside{}), "set-aside", "group", "view", "42")
+	if err != nil {
+		t.Fatalf("execute first page: %v", err)
+	}
+	if firstPage.Notice != "Showing 1 of 2 results. Use --all to see everything." {
+		t.Errorf("first page notice = %q", firstPage.Notice)
+	}
+	if next := firstPage.Data.(map[string]any)["next_page"]; next != "group-page-2" {
+		t.Errorf("next_page = %#v, want group-page-2", next)
+	}
+
+	ids, err := runFormattedCommand(t, setAsideServer(&recordedSetAside{}), []string{"--ids-only"}, "set-aside", "group", "view", "42", "--all")
+	if err != nil || ids != "101\n103\n" {
+		t.Errorf("ids output = %q, err = %v", ids, err)
+	}
+
+	empty, err := runJSONCommand(t, setAsideServer(&recordedSetAside{}), "set-aside", "group", "view", "43")
+	if err != nil {
+		t.Fatalf("execute empty group view: %v", err)
+	}
+	if empty.Summary != "0 threads in Set Aside group 43" {
+		t.Errorf("empty summary = %q", empty.Summary)
+	}
+
+	_, err = runJSONCommand(t, setAsideServer(&recordedSetAside{}), "set-aside", "group", "view", "99")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("unknown group err = %v, want not found", err)
+	}
+}
+
+func TestSetAsideGroupCreate(t *testing.T) {
+	recorded := &recordedSetAside{}
+	response, err := runJSONCommand(t, setAsideServer(recorded), "set-aside", "group", "create", "101", "102")
+	if err != nil {
+		t.Fatalf("execute group create: %v", err)
+	}
+	want := []string{"GET /boxes.json", "POST /boxes/3/groups.json", "POST /postings/moves.json"}
+	if strings.Join(recorded.requests, ",") != strings.Join(want, ",") {
+		t.Fatalf("requests = %v, want %v", recorded.requests, want)
+	}
+	if move := recorded.bodies[1]; move["box_id"] != float64(3) {
+		t.Errorf("move body = %#v, want a move into Set Aside", move)
+	}
+	for i, body := range recorded.bodies[:2] {
+		if ids := body["posting_ids"].([]any); len(ids) != 2 || ids[0] != float64(101) || ids[1] != float64(102) {
+			t.Errorf("request %d posting_ids = %#v", i, body)
+		}
+	}
+	if response.Summary != "Group 44 created with 2 threads" {
+		t.Errorf("summary = %q", response.Summary)
+	}
+	if data := response.Data.(map[string]any); data["id"] != float64(44) {
+		t.Errorf("data = %#v", data)
+	}
+
+	styled, err := runStyledCommand(t, setAsideServer(&recordedSetAside{}), "set-aside", "group", "create", "101")
+	if err != nil || styled != "Group 44 created with 1 thread.\n" {
+		t.Errorf("styled output = %q, err = %v", styled, err)
+	}
+}
+
+func TestSetAsideGroupAdd(t *testing.T) {
+	recorded := &recordedSetAside{}
+	response, err := runJSONCommand(t, setAsideServer(recorded), "set-aside", "group", "add", "102", "--to", "42")
+	if err != nil {
+		t.Fatalf("execute group add: %v", err)
+	}
+	want := []string{"GET /boxes.json", "POST /postings/box_groups.json", "POST /postings/moves.json"}
+	if strings.Join(recorded.requests, ",") != strings.Join(want, ",") {
+		t.Fatalf("requests = %v, want %v", recorded.requests, want)
+	}
+	if move := recorded.bodies[1]; move["box_id"] != float64(3) {
+		t.Errorf("move body = %#v, want a move into Set Aside", move)
+	}
+	body := recorded.bodies[0]
+	if body["box_id"] != float64(3) || body["box_group_id"] != float64(42) {
+		t.Errorf("body = %#v", body)
+	}
+	for i, body := range recorded.bodies[:2] {
+		if ids := body["posting_ids"].([]any); len(ids) != 1 || ids[0] != float64(102) {
+			t.Errorf("request %d posting_ids = %#v", i, body["posting_ids"])
+		}
+	}
+	if response.Summary != "1 thread added to group 42" {
+		t.Errorf("summary = %q", response.Summary)
+	}
+
+	_, err = runJSONCommand(t, setAsideServer(&recordedSetAside{}), "set-aside", "group", "add", "102")
+	if err == nil || !strings.Contains(err.Error(), "--to <group-id>") {
+		t.Errorf("missing --to err = %v", err)
+	}
+}
+
+func TestSetAsideGroupRemove(t *testing.T) {
+	recorded := &recordedSetAside{}
+	response, err := runJSONCommand(t, setAsideServer(recorded), "set-aside", "group", "remove", "101", "103")
+	if err != nil {
+		t.Fatalf("execute group remove: %v", err)
+	}
+	if len(recorded.requests) != 1 || recorded.requests[0] != "DELETE /postings/box_groups.json" {
+		t.Errorf("requests = %v", recorded.requests)
+	}
+	if response.Summary != "2 threads removed from their group" {
+		t.Errorf("summary = %q", response.Summary)
+	}
+}
+
+func TestSetAsideGroupDelete(t *testing.T) {
+	recorded := &recordedSetAside{}
+	response, err := runJSONCommand(t, setAsideServer(recorded), "set-aside", "group", "delete", "42")
+	if err != nil {
+		t.Fatalf("execute group delete: %v", err)
+	}
+	want := []string{"GET /boxes.json", "DELETE /boxes/3/groups/42.json"}
+	if strings.Join(recorded.requests, ",") != strings.Join(want, ",") {
+		t.Errorf("requests = %v, want %v", recorded.requests, want)
+	}
+	if response.Summary != "Group 42 deleted; its threads moved to Previously Seen" {
+		t.Errorf("summary = %q", response.Summary)
+	}
+
+	_, err = runJSONCommand(t, setAsideServer(&recordedSetAside{}), "set-aside", "group", "delete", "0")
+	if err == nil {
+		t.Error("deleting group 0 succeeded, want a usage error")
+	}
+}
+
+// fakeSetAsidePosting is what HEY keeps for a posting that the group commands touch. seen
+// is haystack's enum as it is stored: 1 seen, 0 unseen, -1 bubbled up — "bubbled up" is a
+// value of seen, not a flag of its own, which is why the two relocation routes below
+// differ in what they leave behind.
+type fakeSetAsidePosting struct {
+	box   int64
+	seen  int
+	group int64
+}
+
+// setAsideStateServer models the two ways HEY relocates a posting into Set Aside.
+//
+// POST /postings/moves.json is Box#move_in: it writes the box and marks the posting seen,
+// which is also what clears bubbled_up.
+//
+// The group routes — POST /boxes/3/groups.json and POST /postings/box_groups.json — are
+// Posting#move_to_box_group: they write the box and the group and leave seen exactly as
+// it was, so a bubbled-up thread arrives in Set Aside still bubbled up.
+func setAsideStateServer(postings map[int64]*fakeSetAsidePosting) http.Handler {
+	postingIDs := func(body map[string]any) []int64 {
+		raw := body["posting_ids"].([]any)
+		ids := make([]int64, 0, len(raw))
+		for _, id := range raw {
+			ids = append(ids, int64(id.(float64)))
+		}
+		return ids
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /boxes.json":
+			_, _ = io.WriteString(w, `[{"id":1,"kind":"imbox","name":"Imbox"},{"id":3,"kind":"asidebox","name":"Set Aside"}]`)
+		case "POST /postings/moves.json":
+			for _, id := range postingIDs(body) {
+				postings[id].box = int64(body["box_id"].(float64))
+				postings[id].seen = 1
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case "POST /boxes/3/groups.json":
+			for _, id := range postingIDs(body) {
+				postings[id].box = 3
+				postings[id].group = 44
+			}
+			_, _ = io.WriteString(w, `{"id":44}`)
+		case "POST /postings/box_groups.json":
+			for _, id := range postingIDs(body) {
+				postings[id].box = 3
+				postings[id].group = int64(body["box_group_id"].(float64))
+			}
+			w.WriteHeader(http.StatusCreated)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// A thread bubbled up into the Imbox is stored as seen: -1. Gathering it into a Set Aside
+// group must put it in Set Aside the way HEY's own move does — seen, with the bubble
+// cleared — rather than leave it set aside and bubbled up at once (card 10279322895).
+func TestSetAsideGroupCreateClearsTheBubbleOnAnImboxThread(t *testing.T) {
+	postings := map[int64]*fakeSetAsidePosting{201: {box: 1, seen: -1}}
+	response, err := runJSONCommand(t, setAsideStateServer(postings), "set-aside", "group", "create", "201")
+	if err != nil {
+		t.Fatalf("execute group create: %v", err)
+	}
+	if response.Summary != "Group 44 created with 1 thread" {
+		t.Errorf("summary = %q", response.Summary)
+	}
+	got := postings[201]
+	if got.box != 3 || got.group != 44 {
+		t.Errorf("posting = %+v, want box 3 in group 44", *got)
+	}
+	if got.seen == -1 {
+		t.Errorf("posting is still bubbled up in Set Aside: %+v", *got)
+	}
+}
+
+// A group HEY refuses fails the add before the threads are moved or marked seen.
+func TestSetAsideGroupAddToARefusedGroupMovesNothing(t *testing.T) {
+	var requests []string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		switch r.Method + " " + r.URL.Path {
+		case "GET /boxes.json":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `[{"id":3,"kind":"asidebox","name":"Set Aside"}]`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	_, err := runJSONCommand(t, handler, "set-aside", "group", "add", "201", "--to", "99")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("add to a missing group err = %v, want not found", err)
+	}
+	want := []string{"GET /boxes.json", "POST /postings/box_groups.json"}
+	if strings.Join(requests, ",") != strings.Join(want, ",") {
+		t.Errorf("requests = %v, want %v (no move)", requests, want)
+	}
+}
+
+// Adding an Imbox thread to a group moves it into Set Aside the same way create does, and
+// must clear its bubble on the way for the same reason (cards 10279323648, 10279322895).
+func TestSetAsideGroupAddClearsTheBubbleOnAnImboxThread(t *testing.T) {
+	postings := map[int64]*fakeSetAsidePosting{201: {box: 1, seen: -1}}
+	response, err := runJSONCommand(t, setAsideStateServer(postings), "set-aside", "group", "add", "201", "--to", "42")
+	if err != nil {
+		t.Fatalf("execute group add: %v", err)
+	}
+	if response.Summary != "1 thread added to group 42" {
+		t.Errorf("summary = %q", response.Summary)
+	}
+	got := postings[201]
+	if got.box != 3 || got.group != 42 {
+		t.Errorf("posting = %+v, want box 3 in group 42", *got)
+	}
+	if got.seen == -1 {
+		t.Errorf("posting is still bubbled up in Set Aside: %+v", *got)
+	}
+}

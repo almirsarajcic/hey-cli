@@ -528,7 +528,7 @@ func (v *mailView) Update(msg tea.Msg) (tea.Cmd, bool) {
 		if opened := v.openedPosting(msg.postingID); opened != nil {
 			v.threadPosting = *opened
 		}
-		v.threadBoxKind = v.actionBoxKind()
+		v.threadBoxKind = v.postingBoxKind(v.threadPosting)
 		v.topicName = msg.title
 		v.entries = msg.entries
 		v.attachments = msg.attachments
@@ -734,6 +734,9 @@ func (v *mailView) Update(msg tea.Msg) (tea.Cmd, bool) {
 				v.postingList.postings[idx].Muted = false
 			}
 		}
+		if msg.effect == postingActionRemove {
+			v.removeFromOverlaidLists(msg.postingID)
+		}
 		// The open thread can file back into the box on screen — out and back while
 		// it stays open — and its row was removed when it first filed away, so the
 		// list re-reads its head to hold what the server now does.
@@ -754,6 +757,11 @@ func (v *mailView) Update(msg tea.Msg) (tea.Cmd, bool) {
 		if msg.err != nil {
 			v.noteFailure("Could not mark thread as seen", msg.err)
 			return nil, true
+		}
+		// The snapshot the open thread files on was taken before this landed, so it
+		// still reports the thread unseen — which is what u measures against.
+		if msg.postingID == v.threadPosting.ID {
+			v.threadPosting.Seen = true
 		}
 		if msg.boxID == v.currentBoxID() && msg.sourceKind == v.currentSourceKind() {
 			if idx := v.postingIndex(msg.postingID); idx >= 0 {
@@ -957,7 +965,21 @@ func (v *mailView) HelpBindings() []helpBinding {
 	if v.inThread {
 		bindings := []helpBinding{{"r", "reply"}, {"f", "forward"}}
 		if v.fileablePosting() != nil {
-			bindings = append(bindings, helpBinding{"l", "reply later"}, helpBinding{"a", "set aside"})
+			folderBinding := helpBinding{"b", "labels"}
+			if v.folderDiscoveryErr != "" {
+				folderBinding = helpBinding{"b", "retry labels"}
+			}
+			bindings = append(bindings,
+				helpBinding{"v", "move"},
+				folderBinding,
+				helpBinding{"u", "unseen"},
+				helpBinding{"i", "imbox"},
+				helpBinding{"l", "reply later"},
+				helpBinding{"a", "set aside"},
+				helpBinding{"d", "feed"},
+				helpBinding{"p", "paper trail"},
+				helpBinding{"t", "trash"},
+			)
 		}
 		if len(v.entries) > 1 {
 			bindings = append(bindings, helpBinding{"j/k", "next/previous message"})
@@ -1041,7 +1063,6 @@ func (v *mailView) HelpBindings() []helpBinding {
 		helpBinding{"t", "trash"},
 		helpBinding{"!", "spam"},
 		ignoreBinding,
-		helpBinding{"9", "previously seen"},
 		helpBinding{"ctrl+r", "reload"},
 	)
 	if v.postingList.cover != coverNone {
@@ -1195,6 +1216,9 @@ func (v *mailView) SubnavLeft() tea.Cmd {
 				return v.switchBox(tabIndexes[i-1])
 			}
 		}
+	case mail.KindBundle, mail.KindContact:
+		// Never the current source here: a bundle opens in its own lane over the box,
+		// which the bundleActive guard above already handled.
 	}
 	return nil
 }
@@ -1233,6 +1257,9 @@ func (v *mailView) SubnavRight() tea.Cmd {
 			}
 			return v.openPreviouslySeen()
 		}
+	case mail.KindBundle, mail.KindContact:
+		// Never the current source here: a bundle opens in its own lane over the box,
+		// which the bundleActive guard above already handled.
 	}
 	return nil
 }
@@ -1260,8 +1287,10 @@ func (v *mailView) HandleContentKey(msg tea.KeyPressMsg) tea.Cmd {
 			if v.topicID != 0 {
 				return v.loadForwardContext(v.topicID, v.topicName)
 			}
-		case "a", "A", "l":
+		case "a", "A", "l", "t", "T", "u", "U", "i", "I", "d", "D", "p", "P":
 			return v.fileOpenThread(msg.String())
+		case "b", "B", "v", "V":
+			return v.openThreadPicker(msg.String())
 		case "[":
 			v.moveAttachmentCursor(-1)
 			return nil
@@ -1934,6 +1963,18 @@ func (v *mailView) removePostingAt(index int) {
 	v.postingList.removeAt(index)
 }
 
+// removeFromOverlaidLists takes a row out of the lists drawn over the box list. Nothing
+// re-reads those — a search's results and a bundle's threads are drawn once when they
+// open — so a row left behind stays on screen offering to file a thread that has
+// already moved.
+func (v *mailView) removeFromOverlaidLists(postingID int64) {
+	for _, list := range []*contentList{&v.searchList, &v.bundleList} {
+		if index := postingIndexIn(list.postings, postingID); index >= 0 {
+			list.removeAt(index)
+		}
+	}
+}
+
 func (v *mailView) moveAttachmentCursor(delta int) {
 	if len(v.attachments) == 0 {
 		return
@@ -2113,7 +2154,7 @@ func (v *mailView) openedPosting(postingID int64) *mail.Posting {
 // --- Posting actions ---
 
 func (v *mailView) startMove() {
-	selected := v.actionList().selectedPosting()
+	selected := v.actionPosting()
 	currentSource := v.actionSource()
 	if selected == nil || currentSource == nil {
 		return
@@ -2155,7 +2196,7 @@ func (v *mailView) startFolderPicker() tea.Cmd {
 		v.notice = "Retrying labels…"
 		return v.requestSources()
 	}
-	selected := v.actionList().selectedPosting()
+	selected := v.actionPosting()
 	if selected == nil {
 		return nil
 	}
@@ -2286,6 +2327,18 @@ func (v *mailView) actionList() *contentList {
 	return &v.postingList
 }
 
+// actionPosting is the posting a key acts on: the open thread's own while one is on
+// screen, and the list's selection otherwise. Reading a thread moves the cursor off
+// the row it was opened from — the automatic mark-seen resorts it under the cover —
+// so a picker opened from a thread has to be told which posting it is for rather
+// than reading the list underneath.
+func (v *mailView) actionPosting() *mail.Posting {
+	if v.inThread {
+		return v.fileablePosting()
+	}
+	return v.actionList().selectedPosting()
+}
+
 // actionSource is the box a thread action files out of: the Imbox while the Previously
 // Seen screen is open — its threads are the Imbox's whatever source the screen was
 // opened over — and the source on screen otherwise.
@@ -2305,6 +2358,8 @@ func (v *mailView) imboxSource() *mail.Source {
 	return nil
 }
 
+const unfileableThreadNotice = "Can't file this thread from here"
+
 // fileOpenThread files the thread on screen the way the same key files it on the
 // list, matching the web app's topic toolbar keeping its hotkeys live while a
 // thread is open. Only a thread opened from a filing list — a box or Previously
@@ -2313,12 +2368,18 @@ func (v *mailView) imboxSource() *mail.Source {
 func (v *mailView) fileOpenThread(key string) tea.Cmd {
 	posting := v.fileablePosting()
 	if posting == nil {
-		v.notice = "Can't file this thread from here"
+		v.notice = unfileableThreadNotice
 		return nil
 	}
 	move := v.postingAction(key, *posting, v.threadBoxKind)
 	if move == nil {
 		return nil
+	}
+	// Set Aside and Reply Later leave the thread on screen, in the box it landed
+	// in, so the next filing key can act on it there. Trash closes it: the Trash
+	// is not a box you file out of, and the web app returns to the list too.
+	if key == "t" || key == "T" {
+		v.ExitThread()
 	}
 	// Filing keys pressed faster than their requests answer can complete out of
 	// order, so each dispatch takes a sequence number and only the latest one
@@ -2335,12 +2396,32 @@ func (v *mailView) fileOpenThread(key string) tea.Cmd {
 	}
 }
 
+// openThreadPicker opens the label or move picker over the thread on screen. Both
+// pickers file the posting they are given, so they answer to the same rule the
+// filing keys do rather than opening over a thread there is nothing to file.
+func (v *mailView) openThreadPicker(key string) tea.Cmd {
+	if v.fileablePosting() == nil {
+		v.notice = unfileableThreadNotice
+		return nil
+	}
+	if key == "b" || key == "B" {
+		return v.startFolderPicker()
+	}
+	v.startMove()
+	return nil
+}
+
 // fileablePosting is the posting the open thread files on: the snapshot taken when
 // the thread opened, standing in for a row the list may no longer hold — the
 // automatic mark-seen resorts it under the cover and clamps the cursor away, and a
 // live refresh can drop it off the head page — while the thread stays on screen.
+//
+// Where the thread was opened from does not come into it. Every posting HEY serves
+// carries its own box, so a thread found through a search, a bundle, a contact or a
+// label files out of the box it is actually in rather than out of whatever list is
+// behind it. Only a topic opened by its id has no row, and nothing to file.
 func (v *mailView) fileablePosting() *mail.Posting {
-	if v.searchActive || v.bundleActive || v.threadPosting.ID == 0 {
+	if v.threadPosting.ID == 0 {
 		return nil
 	}
 	return &v.threadPosting
@@ -2351,7 +2432,7 @@ func (v *mailView) handlePostingAction(key string) tea.Cmd {
 	if selected == nil {
 		return nil
 	}
-	return v.postingAction(key, *selected, v.actionBoxKind())
+	return v.postingAction(key, *selected, v.postingBoxKind(*selected))
 }
 
 // actionBoxKind is the box kind a list row files out of, empty over a source that
@@ -2359,6 +2440,30 @@ func (v *mailView) handlePostingAction(key string) tea.Cmd {
 func (v *mailView) actionBoxKind() string {
 	if source := v.actionSource(); source != nil {
 		return source.BoxKind
+	}
+	return ""
+}
+
+// postingBoxKind is the box kind a posting files out of, taken from the posting's own
+// box rather than the list showing it. A search, a label, a collection and a contact's
+// threads all draw rows from several boxes at once, so the list's box says nothing
+// about where any one row lives. Falls back to the list for a row HEY served without
+// a box.
+func (v *mailView) postingBoxKind(p mail.Posting) string {
+	if kind := v.boxKindOf(p.BoxID); kind != "" {
+		return kind
+	}
+	return v.actionBoxKind()
+}
+
+func (v *mailView) boxKindOf(boxID int64) string {
+	if boxID == 0 {
+		return ""
+	}
+	for i := range v.boxes {
+		if v.boxes[i].Kind == mail.KindBox && v.boxes[i].ID == boxID {
+			return v.boxes[i].BoxKind
+		}
 	}
 	return ""
 }

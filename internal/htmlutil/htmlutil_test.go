@@ -1,9 +1,27 @@
 package htmlutil
 
 import (
+	"encoding/json"
+	stdhtml "html"
 	"strings"
 	"testing"
 )
+
+func embeddedHTMLFigure(t *testing.T, content string) string {
+	t.Helper()
+	attributes, err := json.Marshal(struct {
+		ContentType string `json:"contentType"`
+		Content     string `json:"content"`
+	}{ContentType: "text/html", Content: content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return `<figure data-trix-attachment="` + stdhtml.EscapeString(string(attributes)) + `"></figure>`
+}
+
+func canonicalEmbeddedHTML(content string) string {
+	return `<action-text-attachment content-type="text/html" content="` + stdhtml.EscapeString(content) + `"></action-text-attachment>`
+}
 
 func TestToTextPlain(t *testing.T) {
 	got := ToText("hello world")
@@ -169,10 +187,9 @@ func TestToTextTrixFigure(t *testing.T) {
 }
 
 func TestToTextEmbeddedContentStopsRecursing(t *testing.T) {
-	nested := `<figure data-trix-attachment='{"contentType":"text/html","content":"<p>innermost</p>"}'></figure>`
-	for range embeddedContentDepthLimit + 2 {
-		nested = `<figure data-trix-attachment='{"contentType":"text/html","content":"` +
-			strings.ReplaceAll(nested, `"`, `\"`) + `"}'></figure>`
+	nested := "<p>innermost</p>"
+	for range embeddedContentDepthLimit + 1 {
+		nested = embeddedHTMLFigure(t, nested)
 	}
 
 	if got := ToText(nested); strings.Contains(got, "innermost") {
@@ -194,9 +211,54 @@ func TestExtractAttachmentsSkipsEmbeddedHTMLAttachment(t *testing.T) {
 	}
 }
 
+func TestExtractAttachmentsInsideEmbeddedHTMLAttachment(t *testing.T) {
+	// An HTML email from outside HEY arrives as one text/html trix attachment
+	// whose content string holds the original markup, files included.
+	content := `<figure data-trix-attachment="{&quot;contentType&quot;:&quot;text/html&quot;,&quot;content&quot;:&quot;<shadow-content><template><p>Payslip attached.</p><action-text-attachment sgid=\&quot;sgid-1\&quot; content-type=\&quot;application/pdf\&quot; url=\&quot;/rails/active_storage/blobs/redirect/signed/payslip.pdf\&quot; filename=\&quot;payslip.pdf\&quot; filesize=\&quot;44218\&quot;></action-text-attachment></template></shadow-content>&quot;,&quot;data&quot;:&quot;{}&quot;}"></figure>`
+
+	attachments := ExtractAttachments(content)
+	if len(attachments) != 1 {
+		t.Fatalf("ExtractAttachments = %+v, want the file inside the embedded body", attachments)
+	}
+	got := attachments[0]
+	if got.Filename != "payslip.pdf" || got.URL != "/rails/active_storage/blobs/redirect/signed/payslip.pdf" || got.ContentType != "application/pdf" || got.SGID != "sgid-1" || got.ByteSize == nil || *got.ByteSize != 44218 {
+		t.Errorf("embedded attachment = %+v", got)
+	}
+}
+
+func TestExtractAttachmentsInsideCanonicalEmbeddedHTMLAttachment(t *testing.T) {
+	file := `<action-text-attachment sgid="sgid-deep" content-type="application/pdf" url="/rails/active_storage/blobs/redirect/signed/deep.pdf" filename="deep.pdf" filesize="128"></action-text-attachment>`
+	content := embeddedHTMLFigure(t, canonicalEmbeddedHTML(file))
+
+	attachments := ExtractAttachments(content)
+	if len(attachments) != 1 {
+		t.Fatalf("ExtractAttachments = %+v, want the file inside the canonical HTML attachment", attachments)
+	}
+	got := attachments[0]
+	if got.Filename != "deep.pdf" || got.URL != "/rails/active_storage/blobs/redirect/signed/deep.pdf" || got.ContentType != "application/pdf" || got.SGID != "sgid-deep" || got.ByteSize == nil || *got.ByteSize != 128 || !got.Embedded {
+		t.Errorf("canonical embedded attachment = %+v", got)
+	}
+}
+
+func TestExtractAttachmentsEmbeddedContentStopsRecursing(t *testing.T) {
+	file := `<action-text-attachment url="/rails/active_storage/blobs/redirect/signed/deep.pdf" filename="deep.pdf"></action-text-attachment>`
+	withinLimit := file
+	for range embeddedContentDepthLimit {
+		withinLimit = embeddedHTMLFigure(t, withinLimit)
+	}
+	if attachments := ExtractAttachments(withinLimit); len(attachments) != 1 {
+		t.Fatalf("ExtractAttachments = %+v, want the file at the nesting limit", attachments)
+	}
+
+	beyondLimit := embeddedHTMLFigure(t, withinLimit)
+	if attachments := ExtractAttachments(beyondLimit); len(attachments) != 0 {
+		t.Errorf("ExtractAttachments = %+v, should stop before the file beyond the nesting limit", attachments)
+	}
+}
+
 func TestExtractAttachments(t *testing.T) {
-	h := `<action-text-attachment sgid="sgid-1" url="/rails/blobs/report.pdf" filename="quarterly-report.pdf" content-type="application/pdf" filesize="128"></action-text-attachment>
-<figure data-trix-attachment='{"sgid":"sgid-2","url":"/rails/blobs/photo.png","filename":"photo.png","contentType":"image/png","filesize":256}'></figure>`
+	h := `<action-text-attachment sgid="sgid-1" url="/rails/active_storage/blobs/redirect/signed/report.pdf" filename="quarterly-report.pdf" content-type="application/pdf" filesize="128"></action-text-attachment>
+<figure data-trix-attachment='{"sgid":"sgid-2","url":"/rails/active_storage/blobs/redirect/signed/photo.png","filename":"photo.png","contentType":"image/png","filesize":256}'></figure>`
 	attachments := ExtractAttachments(h)
 	if len(attachments) != 2 {
 		t.Fatalf("ExtractAttachments got %d attachments, want 2", len(attachments))
@@ -204,14 +266,14 @@ func TestExtractAttachments(t *testing.T) {
 	if attachments[0].Filename != "quarterly-report.pdf" || attachments[0].ContentType != "application/pdf" || attachments[0].ByteSize == nil || *attachments[0].ByteSize != 128 || attachments[0].SGID != "sgid-1" {
 		t.Errorf("canonical attachment = %+v", attachments[0])
 	}
-	if attachments[1].Filename != "photo.png" || attachments[1].URL != "/rails/blobs/photo.png" || attachments[1].ByteSize == nil || *attachments[1].ByteSize != 256 || attachments[1].SGID != "sgid-2" {
+	if attachments[1].Filename != "photo.png" || attachments[1].URL != "/rails/active_storage/blobs/redirect/signed/photo.png" || attachments[1].ByteSize == nil || *attachments[1].ByteSize != 256 || attachments[1].SGID != "sgid-2" {
 		t.Errorf("Trix attachment = %+v", attachments[1])
 	}
 }
 
 func TestExtractAttachmentsDistinguishesEmptyFromUnknownSize(t *testing.T) {
-	h := `<action-text-attachment url="/rails/blobs/empty.txt" filename="empty.txt" filesize="0"></action-text-attachment>
-<figure data-trix-attachment='{"url":"/rails/blobs/unknown.txt","filename":"unknown.txt"}'></figure>`
+	h := `<action-text-attachment url="/rails/active_storage/blobs/redirect/signed/empty.txt" filename="empty.txt" filesize="0"></action-text-attachment>
+<figure data-trix-attachment='{"url":"/rails/active_storage/blobs/redirect/signed/unknown.txt","filename":"unknown.txt"}'></figure>`
 	attachments := ExtractAttachments(h)
 	if len(attachments) != 2 {
 		t.Fatalf("ExtractAttachments got %d attachments, want 2", len(attachments))
@@ -226,9 +288,26 @@ func TestExtractAttachmentsDistinguishesEmptyFromUnknownSize(t *testing.T) {
 
 func TestExtractAttachmentsSkipsIncompleteElements(t *testing.T) {
 	h := `<action-text-attachment sgid="sgid-1" filename="missing-url.pdf"></action-text-attachment>
-<figure data-trix-attachment='{"url":"/rails/blobs/missing-name"}'></figure>`
+<figure data-trix-attachment='{"url":"/rails/active_storage/blobs/redirect/signed/missing-name"}'></figure>`
 	if attachments := ExtractAttachments(h); len(attachments) != 0 {
 		t.Errorf("ExtractAttachments = %+v, want none", attachments)
+	}
+}
+
+func TestExtractAttachmentsOnlyReturnsHEYBlobPaths(t *testing.T) {
+	embedded := embeddedHTMLFigure(t, `<action-text-attachment url="/identity.json" filename="identity.pdf"></action-text-attachment>
+<figure data-trix-attachment='{"url":"/identity.json","filename":"embedded-trix.pdf"}'></figure>
+<action-text-attachment url="/rails/active_storage/blobs/redirect/signed/embedded.pdf" filename="embedded.pdf"></action-text-attachment>`)
+	content := embedded + `
+<figure data-trix-attachment='{"url":"/rails/active_storage/blobs/redirect/signed/direct.pdf","filename":"direct.pdf"}'></figure>
+<figure data-trix-attachment='{"url":"/identity.json","filename":"direct-trix.pdf"}'></figure>
+<action-text-attachment url="/identity.json" filename="direct-identity.pdf"></action-text-attachment>
+<action-text-attachment url="https://app.hey.com/rails/active_storage/blobs/redirect/signed/absolute.pdf" filename="absolute.pdf"></action-text-attachment>
+<action-text-attachment url="/rails/active_storage/blobs/../identity.json" filename="traversal.pdf"></action-text-attachment>`
+
+	attachments := ExtractAttachments(content)
+	if len(attachments) != 2 || attachments[0].Filename != "embedded.pdf" || attachments[1].Filename != "direct.pdf" {
+		t.Errorf("ExtractAttachments = %+v, want only the embedded and direct HEY blobs", attachments)
 	}
 }
 
@@ -276,15 +355,54 @@ func TestExtractImageURLsActionTextImage(t *testing.T) {
 	}
 }
 
+// Decorative images — avatars, icons, tracking pixels declaring icon-sized
+// dimensions — are not extracted: a digest email carries hundreds of them ahead of
+// its screenshots, and each request would come out of the viewer's image budget.
+func TestExtractImageURLsSkipsDecorativeImages(t *testing.T) {
+	h := `<img src="https://mailer.example.com/open?id=8fd3" width="1" height="1">
+<action-text-attachment url="https://gopher.hey.com/signed/avatar.png" content-type="image" width="40" height="40" caption="Michelle Harjani"><figure><img src="https://gopher.hey.com/signed/avatar-rendered.png"></figure></action-text-attachment>
+<action-text-attachment url="https://gopher.hey.com/signed/screenshot.png" content-type="image"></action-text-attachment>`
+	urls := ExtractImageURLs(h)
+	if len(urls) != 1 || urls[0] != "https://gopher.hey.com/signed/screenshot.png" {
+		t.Errorf("ExtractImageURLs = %v, want only the screenshot", urls)
+	}
+}
+
+func TestToTextSkipsDecorativeImages(t *testing.T) {
+	got := ToText(`<p>Michelle commented<img src="https://gopher.hey.com/signed/avatar.png" width="40" height="40"></p>`)
+	if strings.Contains(got, "[image]") {
+		t.Errorf("ToText should skip a decorative image, got %q", got)
+	}
+	if !strings.Contains(got, "Michelle commented") {
+		t.Errorf("ToText should keep the surrounding text, got %q", got)
+	}
+}
+
+func TestToTextSkipsDecorativeImageAttachments(t *testing.T) {
+	got := ToText(`<p>Kevin commented</p><action-text-attachment content-type="image" url="https://gopher.hey.com/signed/avatar.png" filename="kevin.png" width="20" height="20"></action-text-attachment>`)
+	if strings.Contains(got, "kevin.png") {
+		t.Errorf("ToText should skip a decorative image attachment, got %q", got)
+	}
+	if !strings.Contains(got, "Kevin commented") {
+		t.Errorf("ToText should keep the surrounding text, got %q", got)
+	}
+}
+
 func TestExtractImageURLsTrixFigure(t *testing.T) {
+	// The small figure is a named upload, not decoration: its JSON dimensions are the
+	// file's intrinsic size, so the decorative-image rule does not apply to figures.
 	h := `<figure data-trix-attachment='{"url":"/rails/blobs/abc/image.png","filename":"image.png","contentType":"image/png"}'></figure>
+<figure data-trix-attachment='{"url":"/rails/blobs/abc/pixel-icon.png","filename":"pixel-icon.png","contentType":"image/png","width":32,"height":32}'></figure>
 <figure data-trix-attachment='{"url":"/rails/blobs/abc/report.pdf","filename":"report.pdf","contentType":"application/pdf"}'></figure>`
 	urls := ExtractImageURLs(h)
-	if len(urls) != 1 {
-		t.Fatalf("ExtractImageURLs trix got %d urls, want 1", len(urls))
+	if len(urls) != 2 {
+		t.Fatalf("ExtractImageURLs trix got %d urls, want 2", len(urls))
 	}
 	if urls[0] != "/rails/blobs/abc/image.png" {
 		t.Errorf("url[0] = %q, want %q", urls[0], "/rails/blobs/abc/image.png")
+	}
+	if urls[1] != "/rails/blobs/abc/pixel-icon.png" {
+		t.Errorf("url[1] = %q, want the named small upload", urls[1])
 	}
 }
 

@@ -40,6 +40,7 @@ var boxListing = postingsListing{
 	},
 	breadcrumbs: []output.Breadcrumb{
 		{Action: "read", Command: "hey thread read <thread-id>", Description: "Read an email thread"},
+		{Action: "bundle", Command: "hey bundle view <box-item-id>", Description: "List the unseen threads a bundle row groups"},
 		{Action: "move", Command: "hey move <box-item-id> --to <box>", Description: "Move an email thread to another box"},
 		{Action: "compose", Command: "hey compose --to <email> --subject <subject>", Description: "Compose a new message"},
 	},
@@ -80,7 +81,7 @@ func newBoxReaderCommand(use, short, long, example string) *boxCommand {
 		Short: short,
 		Long:  long,
 		Annotations: map[string]string{
-			"agent_notes": "Accepts a box name or numeric ID. Returns email threads. Use topic_id with hey thread read, reply, and forward; use id with seen, unseen, and move. --page continues from the next_page cursor of an earlier listing of the same box.",
+			"agent_notes": "Accepts a box name or numeric ID. Returns email threads. Use topic_id with hey thread read, reply, and forward; use id with seen, unseen, and move. A row with kind \"bundle\" groups one sender's unseen threads and has no topic_id: list them with hey bundle view <id>, and every thread with that sender via hey contact threads <contact-id>. --page continues from the next_page cursor of an earlier listing of the same box.",
 		},
 		Example: example,
 		RunE:    command.run,

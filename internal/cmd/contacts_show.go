@@ -33,7 +33,7 @@ func newContactsShowCommand() *contactsShowCommand {
 		Use:   "show <id>",
 		Short: "View a contact",
 		Annotations: map[string]string{
-			"agent_notes": "Returns contact details, aliases, screening status, and the private note.",
+			"agent_notes": "Returns contact details, aliases, screening status, and the private note. The embedded postings are one page of the contact's threads; hey contact threads <id> pages through all of them.",
 		},
 		Example: `  hey contact show 12345
   hey contact show 12345 --json`,
@@ -93,6 +93,7 @@ func (c *contactsShowCommand) run(cmd *cobra.Command, args []string) error {
 	return writeOK(result,
 		output.WithSummary(fmt.Sprintf("Contact %d", contactID)),
 		output.WithBreadcrumbs(
+			output.Breadcrumb{Action: "threads", Command: fmt.Sprintf("hey contact threads %d", contactID), Description: "List every thread with this contact"},
 			output.Breadcrumb{Action: "edit", Command: fmt.Sprintf("hey contact update %d", contactID), Description: "Edit this contact"},
 			output.Breadcrumb{Action: "note", Command: fmt.Sprintf("hey contact note set %d", contactID), Description: "Edit the private note"},
 		),

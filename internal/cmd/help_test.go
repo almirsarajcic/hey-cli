@@ -116,6 +116,7 @@ CORE COMMANDS
   journal   Read and write journal entries
 
 MAIL
+  bundle      List the unseen threads a bundle groups
   screener    Decide who gets to email you
   attachment  List and save files from a thread
   draft       Manage unsent drafts
@@ -138,6 +139,7 @@ ORGANIZE
   seen           Mark email threads as seen
   unseen         Mark email threads as unseen
   move           Move email threads to another box
+  set-aside      List and group email threads in Set Aside
   bubble         Bubble email threads up in the Imbox
   trash          Move email threads to Trash
   spam           Mark email threads as spam

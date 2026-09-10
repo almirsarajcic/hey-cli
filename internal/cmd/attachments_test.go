@@ -5,15 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	stdhtml "html"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/basecamp/hey-cli/internal/apierr"
+	"github.com/basecamp/hey-cli/internal/htmlutil"
 )
 
 type attachmentServerState struct {
@@ -146,6 +149,22 @@ func runAttachmentCommand(t *testing.T, server *httptest.Server, args ...string)
 	return output.String(), err
 }
 
+func renderedEmbeddedHTMLFigure(t *testing.T, content string) string {
+	t.Helper()
+	attributes, err := json.Marshal(struct {
+		ContentType string `json:"contentType"`
+		Content     string `json:"content"`
+	}{ContentType: "text/html", Content: content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return `<figure data-trix-attachment="` + stdhtml.EscapeString(string(attributes)) + `"></figure>`
+}
+
+func renderedCanonicalEmbeddedHTML(content string) string {
+	return `<action-text-attachment content-type="text/html" content="` + stdhtml.EscapeString(content) + `"></action-text-attachment>`
+}
+
 func runAttachmentCommandWithStdin(t *testing.T, server *httptest.Server, input string, args ...string) (string, error) {
 	t.Helper()
 	stdin, err := os.CreateTemp(t.TempDir(), "stdin-*")
@@ -192,6 +211,165 @@ func TestAttachmentsListsFilesFromKnownThread(t *testing.T) {
 	defer state.mu.Unlock()
 	if state.entryReads != 1 {
 		t.Errorf("read the entry index %d times, want once for a thread that fits on a page", state.entryReads)
+	}
+}
+
+func TestAttachmentsListsAndSavesNamedFilesInRenderedOrder(t *testing.T) {
+	embeddedImage := `<action-text-attachment sgid="sgid-logo" content-type="image/png" url="/rails/active_storage/blobs/conference-logo.png" filename="conference-logo.png" filesize="9"></action-text-attachment>`
+	embeddedPDF := renderedCanonicalEmbeddedHTML(`<action-text-attachment sgid="sgid-agenda" content-type="application/pdf" url="/rails/active_storage/blobs/conference-agenda.pdf" filename="conference-agenda.pdf" filesize="17"></action-text-attachment>`)
+	directPDF := `<action-text-attachment sgid="sgid-map" content-type="application/pdf" url="/rails/active_storage/blobs/venue-map.pdf" filename="venue-map.pdf" filesize="9"></action-text-attachment>`
+	content := strings.Join([]string{
+		renderedEmbeddedHTMLFigure(t, embeddedImage),
+		renderedEmbeddedHTMLFigure(t, embeddedPDF),
+		directPDF,
+	}, "\n")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/topics/42/entries.json":
+			_, _ = w.Write([]byte(`[{"id":101,"kind":"message"}]`))
+		case "/messages/101.json":
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 101, "content": content})
+		case "/rails/active_storage/blobs/conference-agenda.pdf":
+			w.Header().Set("Content-Type", "application/pdf")
+			_, _ = w.Write([]byte("conference agenda"))
+		case "/rails/active_storage/blobs/venue-map.pdf":
+			w.Header().Set("Content-Type", "application/pdf")
+			_, _ = w.Write([]byte("venue map"))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.RequestURI())
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	stdout, err := runAttachmentCommand(t, server, "attachment", "list", "42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Data []threadAttachment `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+		t.Fatalf("decode response: %v\n%s", err, stdout)
+	}
+	if len(response.Data) != 3 {
+		t.Fatalf("listed attachments = %+v, want three named files", response.Data)
+	}
+	for index, filename := range []string{"conference-logo.png", "conference-agenda.pdf", "venue-map.pdf"} {
+		if response.Data[index].Filename != filename {
+			t.Errorf("attachment %d = %+v, want filename %q", index, response.Data[index], filename)
+		}
+	}
+	if !strings.HasPrefix(response.Data[0].ID, "101:e-") || !strings.HasPrefix(response.Data[1].ID, "101:e-") || response.Data[0].ID == response.Data[1].ID {
+		t.Errorf("embedded attachment IDs = %q, %q, want distinct embedded IDs", response.Data[0].ID, response.Data[1].ID)
+	}
+	if response.Data[2].ID != "101:1" {
+		t.Errorf("direct attachment ID = %q, want its released ID 101:1", response.Data[2].ID)
+	}
+
+	for _, test := range []struct {
+		id       string
+		filename string
+		content  string
+	}{
+		{id: response.Data[1].ID, filename: "conference-agenda.pdf", content: "conference agenda"},
+		{id: "101:01", filename: "venue-map.pdf", content: "venue map"},
+	} {
+		destination := filepath.Join(t.TempDir(), test.filename)
+		if _, err := runAttachmentCommand(t, server, "attachment", "save", test.id, "--output", destination); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := os.ReadFile(destination); err != nil {
+			t.Fatal(err)
+		} else if string(got) != test.content {
+			t.Errorf("saved attachment = %q, want %q", got, test.content)
+		}
+	}
+}
+
+func TestAttachmentsRejectNonBlobURLs(t *testing.T) {
+	malicious := `<action-text-attachment sgid="sgid-identity" content-type="application/pdf" url="/identity.json" filename="invoice.pdf"></action-text-attachment>`
+	valid := `<action-text-attachment sgid="sgid-report" content-type="application/pdf" url="/rails/active_storage/blobs/redirect/signed/report.pdf" filename="report.pdf"></action-text-attachment>`
+	content := renderedEmbeddedHTMLFigure(t, malicious) + valid
+	maliciousID := attachmentIDs(101, []htmlutil.Attachment{{
+		URL:      "/identity.json",
+		Filename: "invoice.pdf",
+		SGID:     "sgid-identity",
+		Embedded: true,
+	}})[0]
+	var identityRequests atomic.Int64
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/topics/42/entries.json":
+			_, _ = w.Write([]byte(`[{"id":101,"kind":"message"}]`))
+		case "/messages/101.json":
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 101, "content": content})
+		case "/identity.json":
+			identityRequests.Add(1)
+			_, _ = w.Write([]byte(`{"email_address":"private@example.com"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.RequestURI())
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	stdout, err := runAttachmentCommand(t, server, "attachment", "list", "42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Data []threadAttachment `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+		t.Fatalf("decode response: %v\n%s", err, stdout)
+	}
+	if len(response.Data) != 1 || response.Data[0].Filename != "report.pdf" || response.Data[0].ID != "101:1" {
+		t.Errorf("listed attachments = %+v, want only the HEY blob", response.Data)
+	}
+
+	_, err = runAttachmentCommand(t, server, "attachment", "save", maliciousID, "--output", filepath.Join(t.TempDir(), "invoice.pdf"))
+	var saveErr *apierr.Error
+	if !errors.As(err, &saveErr) || saveErr.Code != apierr.CodeNotFound {
+		t.Fatalf("saving a rejected non-blob attachment error = %v, want not_found", err)
+	}
+	if got := identityRequests.Load(); got != 0 {
+		t.Errorf("identity endpoint received %d requests", got)
+	}
+}
+
+func TestAttachmentSaveRejectsNonCanonicalOpaqueIDsBeforeRequest(t *testing.T) {
+	validID := attachmentIDs(101, []htmlutil.Attachment{{SGID: "sgid-report", Embedded: true}})[0]
+	keyStart := strings.Index(validID, ":e-") + len(":e-")
+	withNewline := validID[:keyStart+8] + "\r\n" + validID[keyStart+8:]
+
+	const base64URLAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	last := strings.IndexByte(base64URLAlphabet, validID[len(validID)-1])
+	if last < 0 || last%4 != 0 {
+		t.Fatalf("opaque ID has unexpected final base64 character: %q", validID)
+	}
+	withTrailingBits := validID[:len(validID)-1] + string(base64URLAlphabet[last+1])
+
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+
+	for _, id := range []string{withNewline, withTrailingBits} {
+		_, err := runAttachmentCommand(t, server, "attachment", "save", id)
+		var commandErr *apierr.Error
+		if !errors.As(err, &commandErr) || commandErr.Code != apierr.CodeUsage {
+			t.Errorf("attachment save %q error = %v, want usage", id, err)
+		}
+	}
+	if got := requests.Load(); got != 0 {
+		t.Errorf("malformed opaque IDs caused %d requests", got)
 	}
 }
 
@@ -581,12 +759,61 @@ func TestAppendUploadedAttachmentsSupportsAttachmentOnlyMessages(t *testing.T) {
 	}
 }
 
-func TestParseAttachmentID(t *testing.T) {
-	messageID, position, err := parseAttachmentID("101:2")
-	if err != nil || messageID != 101 || position != 2 {
-		t.Fatalf("parseAttachmentID = %d, %d, %v", messageID, position, err)
+func TestAttachmentIDsPreserveDirectPositionsAsEmbeddedFilesAreAdded(t *testing.T) {
+	directReport := htmlutil.Attachment{SGID: "sgid-report"}
+	directMap := htmlutil.Attachment{SGID: "sgid-map"}
+	embeddedLogo := htmlutil.Attachment{SGID: "sgid-logo", Embedded: true}
+	embeddedAgenda := htmlutil.Attachment{SGID: "sgid-agenda", Embedded: true}
+
+	legacy := attachmentIDs(101, []htmlutil.Attachment{directReport, directMap})
+	expanded := attachmentIDs(101, []htmlutil.Attachment{embeddedLogo, directReport, embeddedAgenda, directMap})
+	if legacy[0] != "101:1" || legacy[1] != "101:2" || expanded[1] != legacy[0] || expanded[3] != legacy[1] {
+		t.Errorf("legacy IDs = %v, expanded IDs = %v", legacy, expanded)
 	}
-	for _, id := range []string{"", "101", "101:0", "x:1", "1:2:3"} {
+	if moved := attachmentIDs(101, []htmlutil.Attachment{embeddedAgenda, embeddedLogo}); expanded[0] != moved[1] {
+		t.Errorf("embedded logo ID changed from %q to %q when its position changed", expanded[0], moved[1])
+	}
+}
+
+func TestAttachmentIDsCoverFilesWithoutSGIDsAndDuplicateRepresentations(t *testing.T) {
+	withoutSGID := htmlutil.Attachment{
+		URL:         "/rails/blobs/report.pdf",
+		Filename:    "report.pdf",
+		ContentType: "application/pdf",
+		Embedded:    true,
+	}
+	first := attachmentIDs(101, []htmlutil.Attachment{withoutSGID})[0]
+	moved := attachmentIDs(101, []htmlutil.Attachment{{SGID: "sgid-logo", Embedded: true}, withoutSGID})[1]
+	if first != moved {
+		t.Errorf("fallback attachment ID changed from %q to %q when its position changed", first, moved)
+	}
+
+	duplicateAttachments := []htmlutil.Attachment{withoutSGID, withoutSGID}
+	duplicates := attachmentIDs(101, duplicateAttachments)
+	if duplicates[0] == duplicates[1] || !strings.HasSuffix(duplicates[1], ".2") {
+		t.Errorf("duplicate attachment IDs = %v, want distinct occurrence suffixes", duplicates)
+	}
+	for _, id := range duplicates {
+		if _, _, err := parseAttachmentID(id); err != nil {
+			t.Errorf("parseAttachmentID(%q): %v", id, err)
+		}
+		if _, found := findAttachmentByID(101, id, duplicateAttachments); !found {
+			t.Errorf("findAttachmentByID(%q) did not resolve a duplicate representation", id)
+		}
+	}
+}
+
+func TestParseAttachmentID(t *testing.T) {
+	messageID, selector, err := parseAttachmentID("0101:+2")
+	if err != nil || messageID != 101 || selector != "2" {
+		t.Fatalf("parseAttachmentID = %d, %q, %v", messageID, selector, err)
+	}
+	embeddedID := attachmentIDs(101, []htmlutil.Attachment{{SGID: "sgid-embedded", Embedded: true}})[0]
+	messageID, selector, err = parseAttachmentID(embeddedID)
+	if err != nil || messageID != 101 || !strings.HasPrefix(selector, "e-") {
+		t.Fatalf("parseAttachmentID(%q) = %d, %q, %v", embeddedID, messageID, selector, err)
+	}
+	for _, id := range []string{"", "101", "101:0", "101:e-short", "101:e-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.1", "101:e-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.02", "x:1", "1:2:3"} {
 		if _, _, err := parseAttachmentID(id); err == nil {
 			t.Errorf("parseAttachmentID(%q) succeeded", id)
 		}

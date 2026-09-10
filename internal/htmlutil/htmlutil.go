@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"golang.org/x/net/html"
+
+	attachmentfiles "github.com/basecamp/hey-cli/internal/attachments"
 )
 
 // ToText converts HTML content to plain text, preserving basic structure.
@@ -64,6 +66,8 @@ type Attachment struct {
 	ContentType string
 	ByteSize    *int64
 	SGID        string
+	// Embedded reports whether the file comes from an opaque embedded HTML body.
+	Embedded bool
 }
 
 // ExtractAttachments returns downloadable files in their document order.
@@ -73,7 +77,7 @@ func ExtractAttachments(s string) []Attachment {
 		return nil
 	}
 	var attachments []Attachment
-	findAttachments(doc, &attachments)
+	findAttachments(doc, &attachments, 0)
 	return attachments
 }
 
@@ -88,6 +92,9 @@ func walkNode(b *strings.Builder, n *html.Node, depth int) {
 		case "br":
 			b.WriteString("\n")
 		case "img":
+			if isDecorativeImage(getAttr(n, "width"), getAttr(n, "height")) {
+				return
+			}
 			alt := getAttr(n, "alt")
 			if alt != "" {
 				fmt.Fprintf(b, "[%s]", alt)
@@ -96,6 +103,9 @@ func walkNode(b *strings.Builder, n *html.Node, depth int) {
 			}
 			return
 		case "action-text-attachment":
+			if isImageContentType(getAttr(n, "content-type")) && isDecorativeImage(getAttr(n, "width"), getAttr(n, "height")) {
+				return
+			}
 			filename := getAttr(n, "filename")
 			if filename != "" {
 				fmt.Fprintf(b, "\n[%s]\n", filename)
@@ -336,41 +346,81 @@ func parseEmbeddedContent(content string, depth int) *html.Node {
 	return doc
 }
 
-func findAttachments(n *html.Node, attachments *[]Attachment) {
+func findAttachments(n *html.Node, attachments *[]Attachment, depth int) {
 	if n.Type == html.ElementNode {
 		switch n.Data {
 		case "action-text-attachment":
-			byteSize := parseAttachmentByteSize(getAttr(n, "filesize"))
 			attachment := Attachment{
 				URL:         getAttr(n, "url"),
 				Filename:    getAttr(n, "filename"),
 				ContentType: getAttr(n, "content-type"),
-				ByteSize:    byteSize,
+				ByteSize:    parseAttachmentByteSize(getAttr(n, "filesize")),
 				SGID:        getAttr(n, "sgid"),
+				Embedded:    depth > 0,
 			}
-			if attachment.URL != "" && attachment.Filename != "" {
+			switch {
+			case attachmentfiles.IsHEYBlobURL(attachment.URL) && attachment.Filename != "":
 				*attachments = append(*attachments, attachment)
+			case isHTMLContentType(attachment.ContentType) && getAttr(n, "content") != "":
+				if doc := parseEmbeddedContent(getAttr(n, "content"), depth); doc != nil {
+					findAttachments(doc, attachments, depth+1)
+				}
 			}
 		case "figure":
-			if trix := parseTrixAttachment(n); trix != nil && trix.URL != "" && trix.Filename != "" {
+			trix := parseTrixAttachment(n)
+			switch {
+			case trix == nil:
+			case attachmentfiles.IsHEYBlobURL(trix.URL) && trix.Filename != "":
 				*attachments = append(*attachments, Attachment{
 					URL:         trix.URL,
 					Filename:    trix.Filename,
 					ContentType: trix.ContentType,
 					ByteSize:    nonnegativeAttachmentByteSize(trix.Filesize),
 					SGID:        trix.SGID,
+					Embedded:    depth > 0,
 				})
+			case trix.Content != "":
+				// An inbound email's files are inside the embedded markup, not
+				// on the figure that wraps it. The wrapper itself is not listed:
+				// an embedded body is not a downloadable file.
+				if doc := parseEmbeddedContent(trix.Content, depth); doc != nil {
+					findAttachments(doc, attachments, depth+1)
+				}
 			}
 		}
 	}
 	for child := n.FirstChild; child != nil; child = child.NextSibling {
-		findAttachments(child, attachments)
+		findAttachments(child, attachments, depth)
 	}
+}
+
+func isHTMLContentType(contentType string) bool {
+	contentType = strings.ToLower(strings.TrimSpace(contentType))
+	return contentType == "text/html" || strings.HasPrefix(contentType, "text/html;")
 }
 
 func isImageContentType(contentType string) bool {
 	contentType = strings.ToLower(strings.TrimSpace(contentType))
 	return contentType == "image" || strings.HasPrefix(contentType, "image/")
+}
+
+// An image that declares icon-sized dimensions is decoration: an avatar beside the name
+// it repeats, a glyph beside its label, a tracking pixel. The text alongside carries the
+// meaning, and in a terminal the image's URL would be the widest thing on the page, so a
+// decorative image is not rendered at all. Notification emails are where this bites —
+// a Basecamp digest carries hundreds of 11–40px avatars and icons around its words.
+// 64px holds those with room to spare, while a content image — a screenshot, a photo,
+// a preview — declares its real size or declares nothing.
+const decorativeImageMaxPixels = 64
+
+// isDecorativeImage reports whether width and height declare an icon-sized image. Only
+// an image declaring both dimensions is decoration by this rule: a missing or malformed
+// dimension keeps the image, because most content images declare none.
+func isDecorativeImage(width, height string) bool {
+	w, errW := strconv.Atoi(width)
+	h, errH := strconv.Atoi(height)
+	return errW == nil && errH == nil &&
+		w >= 0 && h >= 0 && w <= decorativeImageMaxPixels && h <= decorativeImageMaxPixels
 }
 
 func parseAttachmentByteSize(value string) *int64 {
@@ -395,12 +445,16 @@ func findImages(n *html.Node, urls *[]string, depth int) {
 	if n.Type == html.ElementNode {
 		switch n.Data {
 		case "img":
-			for _, a := range n.Attr {
-				if a.Key == "src" && a.Val != "" {
-					*urls = append(*urls, a.Val)
-				}
+			if src := getAttr(n, "src"); src != "" && !isDecorativeImage(getAttr(n, "width"), getAttr(n, "height")) {
+				*urls = append(*urls, src)
 			}
 		case "action-text-attachment":
+			// A decorative attachment's subtree is skipped whole: Action Text can
+			// carry the attachment's rendered <img> as a child, and that is the
+			// same decoration under another URL.
+			if isImageContentType(getAttr(n, "content-type")) && isDecorativeImage(getAttr(n, "width"), getAttr(n, "height")) {
+				return
+			}
 			if imageURL := getAttr(n, "url"); isImageContentType(getAttr(n, "content-type")) && imageURL != "" {
 				*urls = append(*urls, imageURL)
 			}

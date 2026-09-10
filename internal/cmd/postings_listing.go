@@ -43,6 +43,17 @@ type sourcePostingRow struct {
 	Date    string `json:"date,omitempty"`
 }
 
+// groupedPostingRow is sourcePostingRow with the Set Aside group. The group is never
+// omitted, so the column is there when nothing on the page is grouped.
+type groupedPostingRow struct {
+	ID      int64  `json:"id"`
+	TopicID int64  `json:"topic_id,omitempty"`
+	Group   string `json:"group"`
+	From    string `json:"from,omitempty"`
+	Summary string `json:"summary,omitempty"`
+	Date    string `json:"date,omitempty"`
+}
+
 // postingsListing is what `hey box view`, `hey label view` and `hey collection view` call the source they
 // list. Everything else about the three — the pagination, the notices and the five output
 // formats — is the same listing.
@@ -51,16 +62,31 @@ type sourcePostingRow struct {
 // `--json` with the same source-and-postings object, while a box answers with HEY's box
 // payload, which carries fields (its sync URLs, its stream name) that are not a listing's
 // business and that consumers already read.
+//
+// groupColumn shows each posting's Set Aside group in the styled and Markdown tables; only
+// Set Aside has groups, so only its listing asks for it.
 type postingsListing struct {
 	heading      string
 	summary      func(count int, name string) string
 	cursorNotice func(shown, total int) string
 	breadcrumbs  []output.Breadcrumb
 	payload      func(source mail.Source, postings []sourcePostingOutput, nextPage string, total int) any
+	groupColumn  bool
+
+	// emptyNotice speaks for a first page with nothing on it, where the counts alone
+	// would say nothing at all. Only the bundle sets one: a bundle with no unseen
+	// threads is not empty, it has been read, and its mail lives on its contact's list.
+	emptyNotice string
 }
 
 func (l postingsListing) write(cmd *cobra.Command, source mail.Source, first pageResult[generated.Posting], request pageRequest, fromCursor bool) error {
-	collected, err := collectPages(cmd.Context(), first, request, readSourcePage(source))
+	return l.writePages(cmd, source, first, request, fromCursor, readSourcePage(source))
+}
+
+// writePages is write for a listing whose pages do not come from a mail source — a Set
+// Aside group is postings too, but it is read on its own route.
+func (l postingsListing) writePages(cmd *cobra.Command, source mail.Source, first pageResult[generated.Posting], request pageRequest, fromCursor bool, read pageReader[generated.Posting]) error {
+	collected, err := collectPages(cmd.Context(), first, request, read)
 	if err != nil {
 		return err
 	}
@@ -107,6 +133,9 @@ func (l postingsListing) sourcePayload(source mail.Source, postings []generated.
 }
 
 func (l postingsListing) notice(shown, total int, hasMore, all, fromCursor bool) string {
+	if shown == 0 && !hasMore && !fromCursor && l.emptyNotice != "" {
+		return l.emptyNotice
+	}
 	if all {
 		if hasMore {
 			return fmt.Sprintf("Showing %d results. Pagination limit reached; continue with --page using next_page.", shown)
@@ -131,19 +160,25 @@ func (l postingsListing) notice(shown, total int, hasMore, all, fromCursor bool)
 func (l postingsListing) writeStyled(cmd *cobra.Command, source mail.Source, postings []generated.Posting, notice string) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "%s: %s\n\n", l.heading, sourceHeading(source))
 	table := newTable(cmd.OutOrStdout())
-	table.addRow([]string{"ID", "Thread", "From", "Summary", "Date"})
+	table.addRow(l.styledColumns([]string{"ID", "Thread"}, "Group", []string{"From", "Summary", "Date"}))
 	for _, posting := range postings {
 		topicID := ""
 		if id := resolvePostingTopicID(posting); id != 0 {
 			topicID = fmt.Sprintf("%d", id)
 		}
-		table.addRow([]string{
-			fmt.Sprintf("%d", posting.Id),
-			topicID,
-			terminal.SanitizeLine(posting.Creator.Name),
-			truncate(terminal.SanitizeLine(posting.Summary), 60),
-			formatDate(posting.CreatedAt),
-		})
+		group := ""
+		if posting.BoxGroupId != 0 {
+			group = fmt.Sprintf("%d", posting.BoxGroupId)
+		}
+		table.addRow(l.styledColumns(
+			[]string{fmt.Sprintf("%d", posting.Id), topicID},
+			group,
+			[]string{
+				terminal.SanitizeLine(posting.Creator.Name),
+				truncate(terminal.SanitizeLine(posting.Summary), 60),
+				formatDate(posting.CreatedAt),
+			},
+		))
 	}
 	table.print()
 	if notice != "" {
@@ -152,19 +187,17 @@ func (l postingsListing) writeStyled(cmd *cobra.Command, source mail.Source, pos
 	return nil
 }
 
+func (l postingsListing) styledColumns(leading []string, group string, trailing []string) []string {
+	columns := append([]string{}, leading...)
+	if l.groupColumn {
+		columns = append(columns, group)
+	}
+	return append(columns, trailing...)
+}
+
 func (l postingsListing) writeMarkdown(cmd *cobra.Command, source mail.Source, postings []generated.Posting, nextPage string, total int, notice string) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "# %s\n\n", markdownSafeText(source.Name))
-	rows := make([]sourcePostingRow, len(postings))
-	for i, posting := range postings {
-		rows[i] = sourcePostingRow{
-			ID:      posting.Id,
-			TopicID: resolvePostingTopicID(posting),
-			From:    posting.Creator.Name,
-			Summary: posting.Summary,
-			Date:    formatDate(posting.CreatedAt),
-		}
-	}
-	if err := writeOK(rows); err != nil {
+	if err := writeOK(l.markdownRows(postings)); err != nil {
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "\n**Total threads:** %d\n", total)
@@ -175,6 +208,39 @@ func (l postingsListing) writeMarkdown(cmd *cobra.Command, source mail.Source, p
 		fmt.Fprintf(cmd.OutOrStdout(), "\n%s\n", markdownSafeText(notice))
 	}
 	return nil
+}
+
+func (l postingsListing) markdownRows(postings []generated.Posting) any {
+	if l.groupColumn {
+		rows := make([]groupedPostingRow, len(postings))
+		for i, posting := range postings {
+			group := ""
+			if posting.BoxGroupId != 0 {
+				group = fmt.Sprintf("%d", posting.BoxGroupId)
+			}
+			rows[i] = groupedPostingRow{
+				ID:      posting.Id,
+				TopicID: resolvePostingTopicID(posting),
+				Group:   group,
+				From:    posting.Creator.Name,
+				Summary: posting.Summary,
+				Date:    formatDate(posting.CreatedAt),
+			}
+		}
+		return rows
+	}
+
+	rows := make([]sourcePostingRow, len(postings))
+	for i, posting := range postings {
+		rows[i] = sourcePostingRow{
+			ID:      posting.Id,
+			TopicID: resolvePostingTopicID(posting),
+			From:    posting.Creator.Name,
+			Summary: posting.Summary,
+			Date:    formatDate(posting.CreatedAt),
+		}
+	}
+	return rows
 }
 
 // readSourcePage reads a page of any mail source, so the growing loop never has to know
